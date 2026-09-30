@@ -11,6 +11,8 @@ export interface LocalDatabase {
   getSetting(key: string): Promise<string | null>
   setSetting(key: string, value: string): Promise<void>
   listNotifications(): Promise<LocalNotification[]>
+  hasNotification(id: string): Promise<boolean>
+  saveNotification(notification: LocalNotification): Promise<void>
 }
 
 export interface LocalNotification {
@@ -24,6 +26,7 @@ export interface LocalNotification {
 
 const memoryCache = new Map<string, unknown>()
 const memorySettings = new Map<string, string>()
+const memoryNotifications: LocalNotification[] = []
 
 class MemoryDatabase implements LocalDatabase {
   async readCache<T>(cacheKey: string, userId: string): Promise<T | null> {
@@ -37,6 +40,10 @@ class MemoryDatabase implements LocalDatabase {
   async getSetting(key: string): Promise<string | null> { return memorySettings.get(key) ?? null }
   async setSetting(key: string, value: string): Promise<void> { memorySettings.set(key, value) }
   async listNotifications(): Promise<LocalNotification[]> { return [] }
+  async hasNotification(id: string): Promise<boolean> { return memoryNotifications.some((item) => item.id === id) }
+  async saveNotification(notification: LocalNotification): Promise<void> {
+    if (!await this.hasNotification(notification.id)) memoryNotifications.unshift(notification)
+  }
 }
 
 class SqliteDatabase implements LocalDatabase {
@@ -109,6 +116,20 @@ class SqliteDatabase implements LocalDatabase {
   async listNotifications(): Promise<LocalNotification[]> {
     return this.db.select<LocalNotification[]>(
       'SELECT id, kind, title, body, created_at, read_at FROM notifications ORDER BY created_at DESC LIMIT 50',
+    )
+  }
+
+  async hasNotification(id: string): Promise<boolean> {
+    const rows = await this.db.select<{ id: string }[]>(
+      'SELECT id FROM notifications WHERE id = $1 LIMIT 1', [id],
+    )
+    return rows.length > 0
+  }
+
+  async saveNotification(notification: LocalNotification): Promise<void> {
+    await this.db.execute(
+      'INSERT OR IGNORE INTO notifications (id, kind, title, body, created_at, read_at) VALUES ($1, $2, $3, $4, $5, $6)',
+      [notification.id, notification.kind, notification.title, notification.body, notification.created_at, notification.read_at],
     )
   }
 }

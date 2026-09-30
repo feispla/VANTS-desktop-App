@@ -205,7 +205,7 @@ export async function fetchRank(client: SupabaseClient, profile: PlayerProfile):
 export async function fetchQueue(client: SupabaseClient, profile: PlayerProfile): Promise<QueueEntry | null> {
   const rows = await getRows<{ status: QueueEntry['status']; created_at: string | null }>(
     client,
-    `ranked_queue?select=status,created_at&player_id=eq.${encodeURIComponent(profile.id)}&status=eq.waiting&order=created_at.desc&limit=1`,
+    `ranked_queue?select=status,created_at&player_id=eq.${encodeURIComponent(profile.id)}&status=in.(waiting,matched)&order=created_at.desc&limit=1`,
   )
   return rows[0] ? { status: rows[0].status, createdAt: rows[0].created_at } : null
 }

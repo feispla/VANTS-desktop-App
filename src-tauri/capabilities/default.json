@@ -9,6 +9,7 @@
     "oauth:allow-cancel",
     "opener:default",
     "stronghold:default",
+    "notification:default",
     "sql:default",
     "sql:allow-execute"
   ]

@@ -12,3 +12,5 @@
 @media(max-width:620px){.connection-chip{display:none}.source-pill{align-self:flex-start}.hero-heading .source-pill{margin-top:3px}.table-row{grid-template-columns:1.8fr 1fr 1fr 28px}.table-head{grid-template-columns:1.8fr 1fr 1fr 28px}.table-row>span:nth-child(4),.table-head span:nth-child(4){display:none}.tournament-description{min-height:0}}
 
 .rank-progress-placeholder{height:7px;background:linear-gradient(90deg,#26262a,#2c2c30);border-radius:9px}
+
+.native-settings-card{margin-top:16px;max-width:760px}.native-settings-card .setting-row:last-child{border-bottom:0}.native-settings-card .setting-row>div{max-width:560px}.native-settings-card .toggle{flex-shrink:0}.setting-row .toggle:focus-visible{outline:2px solid var(--red-bright);outline-offset:3px}

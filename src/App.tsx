@@ -1,12 +1,14 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Bell, ChevronDown, CircleHelp, Crown, Gamepad2, LayoutDashboard, LogOut, Menu, Search, Settings, ShieldCheck, Swords, Trophy, UserRound, Users, X, Zap } from 'lucide-react'
 import type { Session, SupabaseClient } from '@supabase/supabase-js'
 import { isTauri } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
 import './App.css'
 import { fetchMatches, fetchProfile, fetchQueue, fetchRank, fetchTournaments, type CompetitiveRank, type PlayerProfile, type QueueEntry, type RankedMatch, type Tournament } from './lib/api'
 import { createSupabaseClient, signInWithDiscord } from './lib/auth'
 import { supabaseProjectReady, missingSupabaseSettings } from './lib/config'
 import { openLocalDatabase, type LocalDatabase, type LocalNotification } from './lib/database'
+import { requestCompetitiveNotificationPermission, sendCompetitiveNotification } from './lib/notifications'
 import { createAuthStorage } from './lib/secure-storage'
 
 type Page = 'dashboard' | 'matches' | 'tournaments' | 'profile' | 'settings'
@@ -26,6 +28,9 @@ type Workspace = {
 }
 
 type ResourceResult<T> = { value: T; error?: string; stale?: boolean }
+type NotificationSnapshot = { queue: QueueEntry | null; matches: RankedMatch[]; tournaments: Tournament[] }
+type NativeNotificationCandidate = Pick<LocalNotification, 'id' | 'kind' | 'title' | 'body'>
+
 const EMPTY_WORKSPACE: Omit<Workspace, 'client' | 'db'> = {
   session: null, profile: null, matches: [], rank: null, queue: null, tournaments: [],
   notifications: [], errors: [], stale: false,
@@ -50,6 +55,60 @@ async function withCache<T>(db: LocalDatabase, key: string, userId: string, load
   }
 }
 
+function collectNativeNotifications(previous: NotificationSnapshot | null, current: NotificationSnapshot, now: Date): NativeNotificationCandidate[] {
+  const events: NativeNotificationCandidate[] = []
+  const isRecent = (value: string | null, windowMs: number) => {
+    if (!value) return false
+    const timestamp = Date.parse(value)
+    const age = now.getTime() - timestamp
+    return Number.isFinite(timestamp) && age >= 0 && age <= windowMs
+  }
+
+  if (current.queue?.status === 'matched') {
+    const transitioned = previous
+      ? previous.queue?.status !== 'matched' || previous.queue.createdAt !== current.queue.createdAt
+      : isRecent(current.queue.createdAt, 10 * 60_000)
+    if (transitioned) events.push({
+      id: `queue-found-${current.queue.createdAt ?? 'unknown'}`,
+      kind: 'match_found',
+      title: 'Partida encontrada',
+      body: 'La cola competitiva informa que tu entrada fue emparejada.',
+    })
+  }
+
+  const publishedOutcomes = ['victory', 'defeat', 'draw']
+  for (const match of current.matches) {
+    if (!publishedOutcomes.includes(match.outcome)) continue
+    const prior = previous?.matches.find((item) => item.id === match.id)
+    const changedToPublished = previous
+      ? !prior || !publishedOutcomes.includes(prior.outcome)
+      : isRecent(match.completedAt || match.createdAt, 5 * 60_000)
+    if (!changedToPublished) continue
+    const result = match.outcome === 'victory' ? 'Victoria' : match.outcome === 'defeat' ? 'Derrota' : 'Empate'
+    events.push({
+      id: `match-result-${match.id}-${match.outcome}`,
+      kind: 'result_published',
+      title: 'Resultado publicado',
+      body: `${result} contra ${match.opponent}.`,
+    })
+  }
+
+  for (const tournament of current.tournaments) {
+    if (!tournament.startsAt || ['cancelled', 'closed', 'completed'].includes(tournament.status)) continue
+    const startsAt = Date.parse(tournament.startsAt)
+    const remaining = startsAt - now.getTime()
+    if (!Number.isFinite(startsAt) || remaining <= 0 || remaining > 15 * 60_000) continue
+    events.push({
+      id: `tournament-start-${tournament.id}-${tournament.startsAt}`,
+      kind: 'tournament_start',
+      title: 'El torneo empieza pronto',
+      body: `${tournament.name} empieza en ${Math.max(1, Math.ceil(remaining / 60_000))} min.`,
+    })
+  }
+
+  return events
+}
+
 function App() {
   const [page, setPage] = useState<Page>('dashboard')
   const [mobileOpen, setMobileOpen] = useState(false)
@@ -60,46 +119,81 @@ function App() {
   const [refreshing, setRefreshing] = useState(false)
   const [authBusy, setAuthBusy] = useState(false)
   const [initError, setInitError] = useState('')
+  const [notificationsEnabled, setNotificationsEnabled] = useState(true)
+  const refreshInFlightRef = useRef(false)
+  const notificationEnabledRef = useRef(true)
+  const notificationSnapshotRef = useRef<NotificationSnapshot | null>(null)
 
-  const refresh = useCallback(async (client: SupabaseClient, db: LocalDatabase, session: Session | null) => {
-    setRefreshing(true)
-    const userId = session?.user.id ?? 'public'
-    const errors: string[] = []
-    const staleFlags: boolean[] = []
-    const load = async <T,>(key: string, loader: () => Promise<T>): Promise<T | null> => {
-      try {
-        const result = await withCache(db, key, userId, loader)
-        if (result.error) errors.push(`${key}: ${result.error}`)
-        if (result.stale) staleFlags.push(true)
-        return result.value
-      } catch (error) {
-        errors.push(`${key}: ${error instanceof Error ? error.message : 'No se pudieron leer los datos del servicio.'}`)
-        return null
+  const refresh = useCallback(async (client: SupabaseClient, db: LocalDatabase, session: Session | null, silent = false) => {
+    if (refreshInFlightRef.current) return
+    refreshInFlightRef.current = true
+    if (!silent) setRefreshing(true)
+    try {
+      const userId = session?.user.id ?? 'public'
+      const errors: string[] = []
+      const staleFlags: boolean[] = []
+      const load = async <T,>(key: string, loader: () => Promise<T>): Promise<T | null> => {
+        try {
+          const result = await withCache(db, key, userId, loader)
+          if (result.error) errors.push(`${key}: ${result.error}`)
+          if (result.stale) staleFlags.push(true)
+          return result.value
+        } catch (error) {
+          errors.push(`${key}: ${error instanceof Error ? error.message : 'No se pudieron leer los datos del servicio.'}`)
+          return null
+        }
       }
-    }
 
-    const tournaments = await load('tournaments', () => fetchTournaments(client)) ?? []
-    let profile: PlayerProfile | null = null
-    let matches: RankedMatch[] = []
-    let rank: CompetitiveRank | null = null
-    let queue: QueueEntry | null = null
+      const tournaments = await load('tournaments', () => fetchTournaments(client)) ?? []
+      let profile: PlayerProfile | null = null
+      let matches: RankedMatch[] = []
+      let rank: CompetitiveRank | null = null
+      let queue: QueueEntry | null = null
 
-    if (session) {
-      profile = await load('profile', () => fetchProfile(client, session.user))
-      if (profile) {
-        const [loadedMatches, loadedRank, loadedQueue] = await Promise.all([
-          load('matches', () => fetchMatches(client, profile as PlayerProfile)),
-          load('rank', () => fetchRank(client, profile as PlayerProfile)),
-          load('queue', () => fetchQueue(client, profile as PlayerProfile)),
-        ])
-        matches = loadedMatches ?? []
-        rank = loadedRank
-        queue = loadedQueue
+      if (session) {
+        profile = await load('profile', () => fetchProfile(client, session.user))
+        if (profile) {
+          const [loadedMatches, loadedRank, loadedQueue] = await Promise.all([
+            load('matches', () => fetchMatches(client, profile as PlayerProfile)),
+            load('rank', () => fetchRank(client, profile as PlayerProfile)),
+            load('queue', () => fetchQueue(client, profile as PlayerProfile)),
+          ])
+          matches = loadedMatches ?? []
+          rank = loadedRank
+          queue = loadedQueue
+        }
       }
+
+      const snapshot = { queue, matches, tournaments }
+      const previousSnapshot = notificationSnapshotRef.current
+      notificationSnapshotRef.current = snapshot
+      const notifications: LocalNotification[] = await db.listNotifications().catch(() => [] as LocalNotification[])
+      if (!staleFlags.length && !errors.length && isTauri()) {
+        for (const candidate of collectNativeNotifications(previousSnapshot, snapshot, new Date())) {
+          if (!notificationEnabledRef.current) continue
+          if (await db.hasNotification(candidate.id).catch(() => false)) continue
+          const notification: LocalNotification = { ...candidate, created_at: new Date().toISOString(), read_at: null }
+          try {
+            await db.saveNotification(notification)
+          } catch {
+            continue
+          }
+          notifications.unshift(notification)
+          if (notificationEnabledRef.current) {
+            const sent = await sendCompetitiveNotification(notification.title, notification.body).catch(() => false)
+            if (!sent) {
+              notificationEnabledRef.current = false
+              setNotificationsEnabled(false)
+              await db.setSetting('notifications_enabled', 'false').catch(() => undefined)
+            }
+          }
+        }
+      }
+      setWorkspace({ client, db, session, profile, matches, rank, queue, tournaments, notifications, errors, stale: staleFlags.length > 0 })
+    } finally {
+      refreshInFlightRef.current = false
+      if (!silent) setRefreshing(false)
     }
-    const notifications = await db.listNotifications().catch(() => [])
-    setWorkspace({ client, db, session, profile, matches, rank, queue, tournaments, notifications, errors, stale: staleFlags.length > 0 })
-    setRefreshing(false)
   }, [])
 
   useEffect(() => {
@@ -117,6 +211,10 @@ function App() {
         const db = await openLocalDatabase()
         const client = createSupabaseClient(storage)
         const savedPage = await db.getSetting('last_page').catch(() => null)
+        const savedNotifications = await db.getSetting('notifications_enabled').catch(() => null)
+        const notificationsAreEnabled = savedNotifications !== 'false'
+        notificationEnabledRef.current = notificationsAreEnabled
+        setNotificationsEnabled(notificationsAreEnabled)
         if (savedPage && ['dashboard', 'matches', 'tournaments', 'profile', 'settings'].includes(savedPage)) setPage(savedPage as Page)
         if (disposed) return
 
@@ -156,10 +254,53 @@ function App() {
     return () => { disposed = true; unsubscribe?.() }
   }, [refresh])
 
+  const pollingClient = workspace?.client ?? null
+  const pollingDb = workspace?.db ?? null
+  const pollingSession = workspace?.session ?? null
+
+  useEffect(() => {
+    if (!pollingClient || !pollingDb) return
+    const timer = window.setInterval(() => {
+      void refresh(pollingClient, pollingDb, pollingSession, true)
+    }, 60_000)
+    return () => window.clearInterval(timer)
+  }, [pollingClient, pollingDb, pollingSession, refresh])
+
+  useEffect(() => {
+    if (!isTauri()) return
+    let cancelled = false
+    let unlisten: (() => void) | undefined
+    void listen<string>('tray-action', (event) => {
+      if (event.payload !== 'find-match') return
+      setPage('dashboard')
+      setMobileOpen(false)
+      window.setTimeout(() => document.querySelector('.queue-card')?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 220)
+    }).then((stopListening) => {
+      if (cancelled) stopListening()
+      else unlisten = stopListening
+    })
+    return () => { cancelled = true; unlisten?.() }
+  }, [])
+
   const pageTitle = useMemo(() => ({ dashboard: 'Resumen competitivo', matches: 'Historial de partidas', tournaments: 'Torneos', profile: 'Mi perfil', settings: 'Ajustes' })[page], [page])
   const notify = (kind: Toast['kind'], message: string) => {
     setToast({ kind, message })
     window.setTimeout(() => setToast(null), 4200)
+  }
+  const handleToggleNotifications = async () => {
+    const next = !notificationsEnabled
+    if (next && !isTauri()) {
+      notify('info', 'Las notificaciones nativas están disponibles en la aplicación de escritorio instalada.')
+      return
+    }
+    if (next && !await requestCompetitiveNotificationPermission().catch(() => false)) {
+      notify('error', 'El sistema no concedió permiso para mostrar notificaciones.')
+      return
+    }
+    notificationEnabledRef.current = next
+    setNotificationsEnabled(next)
+    await workspace?.db.setSetting('notifications_enabled', String(next)).catch(() => undefined)
+    notify('success', next ? 'Notificaciones competitivas activadas.' : 'Notificaciones competitivas desactivadas.')
   }
   const navigate = (next: Page) => { setPage(next); setMobileOpen(false); void workspace?.db.setSetting('last_page', next) }
 
@@ -214,7 +355,7 @@ function App() {
         {!initError && page === 'matches' && <MatchesPage workspace={workspace} onLogin={() => void handleDiscordLogin()} />}
         {!initError && page === 'tournaments' && <TournamentsPage workspace={workspace} refreshing={refreshing} onRefresh={() => workspace && void refresh(workspace.client, workspace.db, workspace.session)} />}
         {!initError && page === 'profile' && <ProfilePage workspace={workspace} onLogin={() => void handleDiscordLogin()} />}
-        {!initError && page === 'settings' && <SettingsPage workspace={workspace} onLogin={() => void handleDiscordLogin()} onSignOut={() => void handleSignOut()} />}
+        {!initError && page === 'settings' && <><SettingsPage workspace={workspace} onLogin={() => void handleDiscordLogin()} onSignOut={() => void handleSignOut()} /><NativeSettingsPanel enabled={notificationsEnabled} onToggle={() => void handleToggleNotifications()} isDesktop={isTauri()} /></>}
       </div>
     </main>
     {toast && <div className={`toast toast-${toast.kind}`} role="status"><span className="toast-check">{toast.kind === 'error' ? '!' : toast.kind === 'info' ? 'i' : '✓'}</span>{toast.message}</div>}
@@ -234,8 +375,8 @@ function Dashboard({ workspace, refreshing, onRefresh, onLogin, onNavigate }: { 
   const losses = rank?.losses ?? null
   const rankedTotal = wins !== null && losses !== null ? wins + losses : null
   const queueError = workspace?.errors.some((error) => error.startsWith('queue:')) ?? false
-  const queueLabel = !workspace?.session ? 'Conecta Discord' : !profile ? 'Perfil sin vincular' : workspace.queue ? 'En cola' : queueError ? 'Estado no disponible' : 'Sin búsqueda activa'
-  const queueCopy = workspace?.queue ? `Estado real de cola: ${workspace.queue.status}.` : !workspace?.session ? 'Conecta Discord para consultar tu estado personal de cola.' : !profile ? 'Se necesita un perfil de jugador asociado para consultar la cola.' : queueError ? 'No se pudo consultar el estado real de la cola.' : 'No hay una entrada activa en tu cola competitiva.'
+  const queueLabel = !workspace?.session ? 'Conecta Discord' : !profile ? 'Perfil sin vincular' : workspace.queue?.status === 'matched' ? 'Partida encontrada' : workspace.queue ? 'En cola' : queueError ? 'Estado no disponible' : 'Sin búsqueda activa'
+  const queueCopy = workspace?.queue?.status === 'matched' ? 'Supabase informa que tu entrada real ya fue emparejada.' : workspace?.queue ? `Estado real de cola: ${workspace.queue.status}.` : !workspace?.session ? 'Conecta Discord para consultar tu estado personal de cola.' : !profile ? 'Se necesita un perfil de jugador asociado para consultar la cola.' : queueError ? 'No se pudo consultar el estado real de la cola.' : 'No hay una entrada activa en tu cola competitiva.'
   return <>
     <section className="hero-heading"><div><p className="eyebrow">VANTCALL · CIRCUITO COMPETITIVO</p><h1>{profile ? `Buenas, ${profile.display_name || profile.username}` : workspace?.session ? 'Tu cuenta VANTCALL' : 'Compite en VANTCALL'} <span className="wave">✦</span></h1><p className="subtitle">{profile ? 'Tu estado competitivo sincronizado con los datos del proyecto.' : 'Conecta tu cuenta para consultar perfil, rango e historial reales.'}</p></div><button className="secondary-button" onClick={onRefresh} disabled={refreshing}><Search size={16} />{refreshing ? 'Actualizando…' : 'Actualizar datos'}</button></section>
     {!workspace?.session && <section className="auth-banner card"><div><p className="eyebrow">ACCESO SEGURO</p><h2>Vincula tu identidad de jugador</h2><p>Inicia sesión con Discord. El token se guarda cifrado en Stronghold y nunca en localStorage.</p></div><button className="primary-button" onClick={onLogin}><DiscordMark />{`Continuar con Discord`}<span>→</span></button></section>}
@@ -310,6 +451,23 @@ function ProfilePage({ workspace, onLogin }: { workspace: Workspace | null; onLo
 
 function SettingsPage({ workspace, onLogin, onSignOut }: { workspace: Workspace | null; onLogin: () => void; onSignOut: () => void }) {
   return <><section className="hero-heading"><div><p className="eyebrow">CUENTA</p><h1>Ajustes</h1><p className="subtitle">Configuración local y estado de la conexión a datos reales.</p></div></section><div className="settings-card card"><div className="setting-row"><div><strong>Cuenta Discord</strong><span>{workspace?.session ? `Conectada · ${workspace.profile?.username || 'perfil por vincular'}` : 'No hay una sesión autenticada.'}</span></div>{workspace?.session ? <button className="secondary-button" onClick={onSignOut}>Cerrar sesión</button> : <button className="secondary-button" onClick={onLogin}><DiscordMark /> Conectar</button>}</div><div className="setting-row"><div><strong>Modo sin conexión</strong><span>Las últimas respuestas reales se guardan en SQLite; no se crean datos ficticios.</span></div><span className="setting-state">{workspace?.stale ? 'Caché en uso' : 'Preparado'}</span></div><div className="setting-row"><div><strong>Navegación recordada</strong><span>La última sección abierta se guarda localmente en SQLite.</span></div><span className="setting-state state-good">Activa</span></div><div className="setting-row"><div><strong>Versión del cliente</strong><span>VANTCALL Desktop 0.1.0 · Sprint 1</span></div><span className="setting-state">Tauri 2</span></div><div className="setting-row"><div><strong>Integración Supabase</strong><span>{supabaseProjectReady ? 'Proyecto VANTSBETA · lectura con clave pública y sesión autenticada.' : `Configuración pendiente: ${missingSupabaseSettings.join(', ')}`}</span></div><span className={`setting-state ${supabaseProjectReady ? 'state-good' : 'state-warn'}`}>{supabaseProjectReady ? 'Conectable' : 'Pendiente'}</span></div><div className="setup-note"><strong>Discord OAuth</strong><p>En Supabase Auth activa el proveedor Discord y añade <code>http://localhost:*/**</code> a Redirect URLs. La app intercambia el código PKCE y conserva tokens únicamente en Stronghold; la clave de Discord permanece en Supabase.</p></div></div></>
+}
+
+function NativeSettingsPanel({ enabled, onToggle, isDesktop }: { enabled: boolean; onToggle: () => void; isDesktop: boolean }) {
+  return <div className="settings-card card native-settings-card">
+    <div className="setting-row">
+      <div><strong>Notificaciones competitivas</strong><span>Partida encontrada, resultado publicado y torneos que empiezan en los próximos 15 minutos.</span></div>
+      <button className={`toggle ${enabled ? 'on' : ''}`} onClick={onToggle} aria-pressed={enabled} aria-label={enabled ? 'Desactivar notificaciones' : 'Activar notificaciones'}><span /></button>
+    </div>
+    <div className="setting-row">
+      <div><strong>Sincronización de eventos</strong><span>Consulta los datos reales cada minuto mientras VANTCALL Desktop está abierto, también en la bandeja. No opera si sales de la aplicación.</span></div>
+      <span className={`setting-state ${isDesktop ? 'state-good' : 'state-warn'}`}>{isDesktop ? 'Cada 60 s' : 'Solo escritorio'}</span>
+    </div>
+    <div className="setting-row">
+      <div><strong>Bandeja del sistema</strong><span>Al cerrar la ventana se oculta en la bandeja; usa “Abrir”, “Buscar partida” o “Salir” desde su menú.</span></div>
+      <span className={`setting-state ${isDesktop ? 'state-good' : 'state-warn'}`}>{isDesktop ? 'Activa' : 'Solo escritorio'}</span>
+    </div>
+  </div>
 }
 
 function EmptyState({ title, body }: { title: string; body: string }) { return <div className="empty-state"><span className="empty-mark">—</span><strong>{title}</strong><p>{body}</p></div> }

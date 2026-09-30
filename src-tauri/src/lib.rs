@@ -1,5 +1,7 @@
 use keyring::{Entry, Error as KeyringError};
-use tauri::Manager;
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::tray::TrayIconBuilder;
+use tauri::{Emitter, Manager, WindowEvent};
 use tauri_plugin_sql::{Migration, MigrationKind};
 use uuid::Uuid;
 
@@ -24,6 +26,54 @@ fn get_or_create_vault_password() -> Result<String, String> {
     }
 }
 
+fn create_system_tray(app: &tauri::App) -> tauri::Result<()> {
+    let open = MenuItem::with_id(app, "open", "Abrir VANTCALL", true, None::<&str>)?;
+    let find_match = MenuItem::with_id(app, "find-match", "Buscar partida", true, None::<&str>)?;
+    let separator = PredefinedMenuItem::separator(app)?;
+    let quit = MenuItem::with_id(app, "quit", "Salir", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&open, &find_match, &separator, &quit])?;
+    let icon = app.default_window_icon().cloned()
+        .expect("Falta el icono predeterminado definido en tauri.conf.json");
+
+    TrayIconBuilder::new()
+        .icon(icon)
+        .tooltip("VANTCALL Desktop")
+        .menu(&menu)
+        .show_menu_on_left_click(true)
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            "open" => show_main_window(app),
+            "find-match" => {
+                show_main_window(app);
+                let _ = app.emit("tray-action", "find-match");
+            }
+            "quit" => app.exit(0),
+            _ => {}
+        })
+        .build(app)?;
+
+    if let Some(window) = app.get_webview_window("main") {
+        let app_handle = app.handle().clone();
+        window.on_window_event(move |event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                if let Some(window) = app_handle.get_webview_window("main") {
+                    let _ = window.hide();
+                }
+            }
+        });
+    }
+
+    Ok(())
+}
+
+fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let migrations = vec![Migration {
@@ -36,6 +86,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_oauth::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(
             tauri_plugin_sql::Builder::default()
                 .add_migrations("sqlite:vantcall.sqlite", migrations)
@@ -49,6 +100,8 @@ pub fn run() {
             app.handle().plugin(
                 tauri_plugin_stronghold::Builder::with_argon2(&salt_path).build(),
             )?;
+
+            create_system_tray(app)?;
 
             if cfg!(debug_assertions) {
                 app.handle().plugin(
