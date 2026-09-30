@@ -28,9 +28,25 @@ const config = {
   },
 }
 
+const windowsThumbprint = process.env.WINDOWS_SIGNING_THUMBPRINT?.trim()
+if (windowsThumbprint) {
+  const timestampUrl = process.env.WINDOWS_TIMESTAMP_URL?.trim()
+  if (!/^[a-f\d]{40,64}$/i.test(windowsThumbprint)) {
+    throw new Error('Windows signing certificate thumbprint is not a valid hex fingerprint.')
+  }
+  if (!timestampUrl || !/^https?:\/\//i.test(timestampUrl)) {
+    throw new Error('Set WINDOWS_TIMESTAMP_URL to the timestamp server provided by the code-signing certificate authority.')
+  }
+  config.bundle.windows = {
+    certificateThumbprint: windowsThumbprint,
+    digestAlgorithm: 'sha256',
+    timestampUrl,
+  }
+}
+
 await writeFile(
   new URL('../src-tauri/tauri.updater.generated.conf.json', import.meta.url),
   `${JSON.stringify(config, null, 2)}\n`,
   { mode: 0o600 },
 )
-console.log('Configuración temporal del updater escrita; clave pública validada y endpoint del mirror configurado.')
+console.log(`Updater config written; public key validated${windowsThumbprint ? ' and Windows signing configured' : ''}.`)

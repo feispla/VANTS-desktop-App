@@ -72,10 +72,62 @@ jobs:
       - name: Run frontend lint
         run: npm run lint
 
+      - name: Import Apple Developer ID certificate and notarization identity
+        if: ${{ matrix.platform == 'macos-latest' && vars.APPLE_SIGNING_ENABLED == 'true' }}
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          : "${APPLE_CERTIFICATE:?Add the APPLE_CERTIFICATE Actions secret before enabling Apple signing}"
+          : "${APPLE_CERTIFICATE_PASSWORD:?Add the APPLE_CERTIFICATE_PASSWORD Actions secret before enabling Apple signing}"
+          : "${KEYCHAIN_PASSWORD:?Add the KEYCHAIN_PASSWORD Actions secret before enabling Apple signing}"
+          : "${APPLE_ID:?Add the APPLE_ID Actions secret before enabling notarization}"
+          : "${APPLE_PASSWORD:?Add an app-specific APPLE_PASSWORD Actions secret before enabling notarization}"
+          : "${APPLE_TEAM_ID:?Add the APPLE_TEAM_ID Actions secret before enabling notarization}"
+          KEYCHAIN_NAME="build-${GITHUB_RUN_ID}.keychain"
+          echo "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/vantcall-developer-id.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_NAME"
+          security default-keychain -s "$KEYCHAIN_NAME"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_NAME"
+          security set-keychain-settings -t 3600 -u "$KEYCHAIN_NAME"
+          security import "$RUNNER_TEMP/vantcall-developer-id.p12" -k "$KEYCHAIN_NAME" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_NAME"
+          rm -f "$RUNNER_TEMP/vantcall-developer-id.p12"
+          IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN_NAME" | awk -F'"' '/Developer ID Application/ { print $2; exit }')"
+          : "${IDENTITY:?No Developer ID Application identity found in the imported certificate}"
+          echo "APPLE_SIGNING_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+
+      - name: Import Windows Authenticode certificate
+        if: ${{ matrix.platform == 'windows-latest' && vars.WINDOWS_SIGNING_ENABLED == 'true' }}
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          WINDOWS_TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE)) { throw 'Add WINDOWS_CERTIFICATE before enabling Windows signing.' }
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_PASSWORD)) { throw 'Add WINDOWS_CERTIFICATE_PASSWORD before enabling Windows signing.' }
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_TIMESTAMP_URL) -or $env:WINDOWS_TIMESTAMP_URL -notmatch '^https?://') { throw 'Set WINDOWS_TIMESTAMP_URL to the timestamp server supplied by the certificate authority.' }
+          $certificatePath = Join-Path $env:RUNNER_TEMP 'vantcall-authenticode.pfx'
+          [System.IO.File]::WriteAllBytes($certificatePath, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          $password = ConvertTo-SecureString -String $env:WINDOWS_CERTIFICATE_PASSWORD -Force -AsPlainText
+          $certificates = Import-PfxCertificate -FilePath $certificatePath -CertStoreLocation Cert:\CurrentUser\My -Password $password
+          $signingCertificate = $certificates | Where-Object { $_.HasPrivateKey } | Select-Object -First 1
+          Remove-Item -Force $certificatePath
+          if ($null -eq $signingCertificate) { throw 'No certificate with a private key was found in the PFX.' }
+          "WINDOWS_SIGNING_THUMBPRINT=$($signingCertificate.Thumbprint)" >> $env:GITHUB_ENV
+          "WINDOWS_TIMESTAMP_URL=$($env:WINDOWS_TIMESTAMP_URL)" >> $env:GITHUB_ENV
+
       - name: Prepare signed updater configuration
         run: node scripts/prepare-updater-config.mjs
         env:
           VANTCALL_UPDATER_PUBKEY_B64: ${{ vars.VANTCALL_UPDATER_PUBKEY_B64 }}
+          WINDOWS_TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}
 
       - name: Build and upload a private-review draft to the artifact-only mirror
         uses: tauri-apps/tauri-action@v1
@@ -84,6 +136,12 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           VITE_UPDATER_ENABLED: 'true'
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           projectPath: .
           owner: feispla

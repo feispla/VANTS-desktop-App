@@ -1,35 +1,45 @@
 # Configuración del updater firmado
 
-El código permanece en `feispla/vantcall-desktop-App` (privado). El mirror público `feispla/vantcall-desktop-releases` ya fue creado con un solo archivo `README.md`; todavía no contiene instaladores ni releases. La app consultará:
+El código permanece en `feispla/vantcall-desktop-App` (privado). El mirror público `feispla/vantcall-desktop-releases` ya existe y solo contiene su `README.md`; aún no tiene instaladores ni releases. La app consultará:
 
 ```text
 https://github.com/feispla/vantcall-desktop-releases/releases/latest/download/latest.json
 ```
 
-El workflow `.github/workflows/updater-draft.yml` compila Windows, Linux y macOS al enviar una etiqueta `v*` y crea una **release en borrador**. Un borrador no es el feed público consumido por los clientes. Una persona responsable debe revisar los assets y sus firmas y pulsar **Publish release** para hacerla pública; el updater solo ve releases publicadas. La publicación de una release requerirá una confirmación independiente cuando haya un borrador revisable.
+El workflow `.github/workflows/updater-draft.yml` compila Windows, Linux y macOS al enviar una etiqueta `v*`, y crea únicamente una **release en borrador** en el mirror. Los borradores no se entregan al público ni son consumidos por el updater. Una persona responsable revisa assets y firmas y publica la release en una acción separada; este trabajo no publica instaladores.
 
-## Configuración pendiente del propietario
+## Updater: clave minisign y mirror
 
-1. Verifica que el mirror `feispla/vantcall-desktop-releases` conserve solo su README hasta preparar la primera distribución. No copies código fuente, historial, issues, proyectos ni archivos del repositorio privado.
-2. Genera una clave minisign de Tauri en un equipo de confianza. No generes la clave en Actions ni subas el archivo privado al repositorio:
+1. Genera una clave minisign de Tauri en un equipo de confianza. No generes la clave privada en Actions ni la subas al repositorio:
 
    ```bash
    npx tauri signer generate -w ~/.tauri/vantcall-desktop.key
    ```
 
-   El comando guarda la clave privada en el archivo indicado e imprime la clave pública. Copia solo esa clave pública (las dos líneas completas) a `~/.tauri/vantcall-desktop.pub`; conserva la clave privada y la contraseña fuera del repositorio. Para obtener una variable de una sola línea, codifica el archivo público:
+   El comando guarda la clave privada y muestra la clave pública. Copia solo las dos líneas de clave pública a `~/.tauri/vantcall-desktop.pub`; conserva la privada y la contraseña fuera del repositorio. Codifica la pública para la variable de GitHub:
 
    ```bash
    base64 -w0 ~/.tauri/vantcall-desktop.pub
    ```
 
    En macOS, si `base64 -w0` no existe, usa `base64 < ~/.tauri/vantcall-desktop.pub | tr -d '\n'`.
-3. En **Settings → Secrets and variables → Actions** de `vantcall-desktop-App`, crea estos secrets: `TAURI_SIGNING_PRIVATE_KEY` (contenido completo del archivo privado), `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` y `MIRROR_PUBLISH_TOKEN`. El token debe ser fine-grained, limitado al repositorio `vantcall-desktop-releases`, con permiso `Contents: Read and write` para crear releases y subir assets. Nunca pegues estos valores en el chat ni los incluyas en commits.
-4. En la misma sección, crea la variable (no secret) `VANTCALL_UPDATER_PUBKEY_B64` con la salida Base64 de la clave pública. La clave pública se incrusta en el binario para verificar firmas; no es confidencial.
-5. Envía un tag cuyo número coincida con `src-tauri/tauri.conf.json` (`v0.1.0` para la versión actual). Actions producirá un borrador en el mirror. Verifica que `latest.json` incluya URLs de ese mirror y que cada paquete descargable tenga su `.sig`; solicita y obtén confirmación antes de publicar la release.
+2. En **Settings → Secrets and variables → Actions** del repositorio privado, configura los secrets `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` y `MIRROR_PUBLISH_TOKEN`. El token debe ser fine-grained y limitado al repositorio `vantcall-desktop-releases`, con `Contents: Read and write`; no pegues secretos en el chat ni en commits.
+3. Crea la variable (no secreta) `VANTCALL_UPDATER_PUBKEY_B64` con la salida Base64 de la clave pública. La clave se incorpora al binario para validar firmas y no es confidencial.
 
-## Consideraciones
+## Firma Authenticode de Windows
 
-- Tauri verifica la firma del updater antes de instalar. `scripts/prepare-updater-config.mjs` falla si no encuentra una clave pública minisign y nunca lee ni escribe la clave privada.
-- Este flujo firma los artefactos del updater, pero **no** configura certificados Apple Developer ID/notarización ni Authenticode para Windows. Eso queda para el Sprint 3; los sistemas operativos pueden mostrar advertencias hasta configurar esos certificados.
-- El mirror creado contiene únicamente `README.md`; no se han creado secrets, tags, borradores ni releases. La sesión GitHub disponible aquí no puede administrar Actions Secrets, por lo que el propietario debe configurarlos directamente en GitHub.
+Tauri puede firmar Windows cuando se aporte un certificado real de **code signing** (no SSL). Obtén un `.pfx` de la autoridad certificadora elegida, con su password y URL de timestamp. En **Actions → Secrets** crea `WINDOWS_CERTIFICATE` (PFX codificado en Base64) y `WINDOWS_CERTIFICATE_PASSWORD`. En **Actions → Variables** crea `WINDOWS_TIMESTAMP_URL` con la URL timestamp suministrada por la autoridad y `WINDOWS_SIGNING_ENABLED=true`.
+
+El workflow importa el PFX en el certificado de usuario del runner, lee el thumbprint de su clave privada y genera un overlay temporal Tauri con `sha256` y esa URL. El PFX se borra del disco temporal después de importarse; los valores del certificado nunca se escriben al repo. Mientras la variable no sea exactamente `true`, Windows compila sin certificado. Si se habilita sin los secrets o timestamp requeridos, ese job falla claramente.
+
+## Firma y notarización de macOS
+
+Para distribuir fuera de App Store se necesita un certificado **Developer ID Application** asociado a una cuenta Apple Developer de pago. La documentación oficial de Tauri indica actualmente USD 99/año y que el certificado se debe crear/exportar desde un equipo Apple; no se ha comprado una cuenta ni certificado desde este trabajo. Exporta el certificado como `.p12` y codifícalo en Base64. En **Actions → Secrets** crea `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `KEYCHAIN_PASSWORD`, `APPLE_ID`, `APPLE_PASSWORD` (contraseña específica de app) y `APPLE_TEAM_ID`. En **Actions → Variables**, crea `APPLE_SIGNING_ENABLED=true` solo tras verificar que todos esos valores son válidos.
+
+El runner macOS importa el certificado en un keychain temporal, identifica `Developer ID Application`, firma y envía el bundle a notarización con las credenciales Apple. Si no se habilita la variable, se omite la importación y los builds de macOS quedan sin notarizar/firma de Developer ID. El owner debe guardar esos secretos directamente en GitHub; nunca enviarlos por chat.
+
+## Publicación futura
+
+Con el mirror y las variables configuradas, crea un tag que coincida con la versión de `src-tauri/tauri.conf.json` (ahora `v0.1.0`). Actions producirá un borrador, no una release pública. Revisa los instaladores, la firma de updater `.sig` y `latest.json`, confirma que las URLs solo apuntan al mirror, y publica solo tras una aprobación separada.
+
+El GitHub connector disponible en esta sesión no concede lectura/escritura de Actions Secrets (`HTTP 403`), así que no se han creado ni inspeccionado valores secretos. Tampoco se han creado tags, corrido el workflow, comprado certificados, publicado borradores o releases. El código de firma es condicional y espera credenciales del propietario.
