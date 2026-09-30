@@ -13,11 +13,17 @@ Cliente premium de escritorio para el circuito competitivo VANTCALL, construido 
 
 **Solo lectura sobre Supabase:** este cliente no contiene operaciones de inserción, actualización ni borrado en tablas remotas. La cola de juego queda deshabilitada hasta que exista un endpoint oficial de matchmaking que defina y autorice escrituras. El cierre de sesión limpia metadatos y caché privados locales.
 
+## Sprint 2 — experiencia nativa
+
+- Notificaciones del sistema para una transición real de cola a `matched`, un resultado que se publica/cambia y torneos que empiezan en 15 minutos. El cliente consulta datos cada 60 segundos mientras está abierto o en la bandeja; al salir de la aplicación deja de consultar. Se puede desactivar el permiso en Ajustes y cada evento se deduplica en SQLite.
+- La X oculta la ventana en la bandeja. El menú ofrece Abrir VANTCALL, Buscar partida (abre el dashboard; no escribe en la cola) y Salir.
+- **Updater pendiente de distribución:** el repositorio es privado, no tiene releases y las apps instaladas no pueden descargar anónimamente sus assets. La sesión de GitHub tampoco tiene permiso para administrar Actions Secrets. No se configuró un endpoint no accesible ni se incrustó un token/clave privada; hace falta decidir un host público para `latest.json`/instaladores y añadir los secretos de firma con permisos apropiados.
+
 ## Requisitos para conectar datos
 
 1. El cliente ya viene conectado al proyecto VANTSBETA con su clave pública `sb_publishable_...`; `.env.example` documenta el mismo proyecto y se puede copiar a `.env.local` para usar overrides. También admite `VITE_SUPABASE_ANON_KEY` legacy; **nunca uses `service_role` ni `sb_secret_...`**.
 2. En Supabase Auth, habilita Discord y configura las credenciales del proveedor. Añade `http://localhost:*/**` a la lista de Redirect URLs de Supabase (el cliente genera un redirect con `/` final). Discord debe tener como callback el URL que muestra Supabase, normalmente `https://<project-ref>.supabase.co/auth/v1/callback`.
-4. Verifica que las políticas RLS permitan a un usuario autenticado leer solo su propia fila de `players`/`profiles` y sus estadísticas/partidas/cola, además de permitir la lectura pública prevista para torneos.
+3. Verifica que las políticas RLS permitan a un usuario autenticado leer solo su propia fila de `players`/`profiles` y sus estadísticas/partidas/cola, además de permitir la lectura pública prevista para torneos.
 
 El conector de Supabase confirmó que las tablas competitivas `ranked_matches`, `ranked_queue`, `ranked_history`, `season_player_stats`, `seasons` y `tournaments` están actualmente vacías. La UI mostrará estados vacíos hasta que existan registros reales.
 
