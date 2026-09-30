@@ -1,6 +1,6 @@
 [package]
 name = "vantcall-desktop"
-version = "0.1.0"
+version = "0.1.1"
 description = "Cliente de escritorio competitivo para la plataforma VANTCALL"
 authors = ["VANTCALL"]
 repository = "https://github.com/feispla/vantcall-desktop-App"
