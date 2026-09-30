@@ -1,0 +1,101 @@
+name: Build signed VANTCALL updater draft
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-draft:
+    name: Build ${{ matrix.platform }} (${{ matrix.label }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            label: macOS Apple Silicon
+            args: --target aarch64-apple-darwin
+          - platform: macos-latest
+            label: macOS Intel
+            args: --target x86_64-apple-darwin
+          - platform: ubuntu-22.04
+            label: Linux x64
+            args: ''
+          - platform: windows-latest
+            label: Windows x64
+            args: ''
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - name: Check out the tagged private source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.ref }}
+
+      - name: Validate tag matches the application version
+        shell: bash
+        run: |
+          app_version="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          expected_tag="v${app_version}"
+          if [[ "${GITHUB_REF_NAME}" != "${expected_tag}" ]]; then
+            echo "Tag ${GITHUB_REF_NAME} must match ${expected_tag} from tauri.conf.json." >&2
+            exit 1
+          fi
+
+      - name: Install Linux system dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xdg-utils
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Cache Rust build artifacts
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ./src-tauri -> target
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Run frontend lint
+        run: npm run lint
+
+      - name: Prepare signed updater configuration
+        run: node scripts/prepare-updater-config.mjs
+        env:
+          VANTCALL_UPDATER_PUBKEY_B64: ${{ vars.VANTCALL_UPDATER_PUBKEY_B64 }}
+
+      - name: Build and upload a private-review draft to the artifact-only mirror
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.MIRROR_PUBLISH_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          VITE_UPDATER_ENABLED: 'true'
+        with:
+          projectPath: .
+          owner: feispla
+          repo: vantcall-desktop-releases
+          tagName: v__VERSION__
+          releaseName: VANTCALL Desktop v__VERSION__
+          releaseBody: >-
+            Borrador de distribución de VANTCALL Desktop. Revisar instaladores y firmas antes de publicar.
+            Esta release contiene artefactos; el repositorio fuente permanece privado.
+          releaseCommitish: main
+          releaseDraft: true
+          prerelease: false
+          uploadUpdaterJson: true
+          uploadUpdaterSignatures: true
+          args: --config src-tauri/tauri.updater.generated.conf.json ${{ matrix.args }}

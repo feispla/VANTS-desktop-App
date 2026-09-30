@@ -11,6 +11,7 @@ node_modules
 dist
 dist-ssr
 *.local
+src-tauri/tauri.updater.generated.conf.json
 
 # Editor directories and files
 .vscode/*

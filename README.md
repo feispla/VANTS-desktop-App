@@ -17,7 +17,7 @@ Cliente premium de escritorio para el circuito competitivo VANTCALL, construido 
 
 - Notificaciones del sistema para una transición real de cola a `matched`, un resultado que se publica/cambia y torneos que empiezan en 15 minutos. El cliente consulta datos cada 60 segundos mientras está abierto o en la bandeja; al salir de la aplicación deja de consultar. Se puede desactivar el permiso en Ajustes y cada evento se deduplica en SQLite.
 - La X oculta la ventana en la bandeja. El menú ofrece Abrir VANTCALL, Buscar partida (abre el dashboard; no escribe en la cola) y Salir.
-- **Updater pendiente de distribución:** el repositorio es privado, no tiene releases y las apps instaladas no pueden descargar anónimamente sus assets. La sesión de GitHub tampoco tiene permiso para administrar Actions Secrets. No se configuró un endpoint no accesible ni se incrustó un token/clave privada; hace falta decidir un host público para `latest.json`/instaladores y añadir los secretos de firma con permisos apropiados.
+- **Updater preparado, distribución pendiente:** el plugin oficial consulta actualizaciones firmadas desde `https://github.com/feispla/vantcall-desktop-releases/releases/latest/download/latest.json`; los ajustes permiten revisar e instalar y el cliente comprueba el feed al iniciar. `docs/updater-release-setup.md` explica el mirror de artefactos y los secretos necesarios. `.github/workflows/updater-draft.yml` crea únicamente borradores; una persona debe revisarlos y publicarlos. El repositorio de código fuente permanece privado y este cambio no crea el mirror, secretos, tags ni releases.
 
 ## Requisitos para conectar datos
 
@@ -44,7 +44,7 @@ npm run desktop:dev
 npm run desktop:build
 ```
 
-El empaquetado Tauri requiere Rust/Cargo y las dependencias nativas del sistema de Tauri. La ventana inicial es de 1280 × 840 y su tamaño mínimo es 1200 × 800.
+El empaquetado Tauri requiere Rust/Cargo y las dependencias nativas del sistema de Tauri. La ventana inicial es de 1280 × 840 y su tamaño mínimo es 1200 × 800. Para el flujo de actualizaciones firmado, consulta [docs/updater-release-setup.md](docs/updater-release-setup.md); los builds locales no habilitan el feed.
 
 ## Autenticación segura y datos locales
 
