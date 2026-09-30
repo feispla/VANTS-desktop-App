@@ -4,7 +4,7 @@ Este documento recoge únicamente tareas que requieren una acción autenticada d
 
 ## Secrets y Variables de GitHub Actions
 
-Antes de considerar completa la distribución, verifica en **feispla/vantcall-desktop-App → Settings → Secrets and variables → Actions** estos cuatro valores: `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`, `MIRROR_PUBLISH_TOKEN` (Secrets) y `VANTCALL_UPDATER_PUBKEY_B64` (Variable recomendada; el workflow también acepta Secret). La creación y el guardado de `MIRROR_PUBLISH_TOKEN` se completaron en esta sesión; la variable pública y el contenido de la clave privada pasan sus pasos previos. El run `v0.1.0` falló por el CR/LF final de la clave y `v0.1.1` corrigió eso, pero los cuatro jobs ahora fallan en Tauri con `incorrect updater private key password: Wrong password for that key`. Esto confirma que `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` no coincide con la contraseña usada para cifrar la clave privada local. La CLI de GitHub devuelve `403 Resource not accessible by integration` al listar names de secrets/variables y la página autenticada de Settings agotó el tiempo, por lo que no se pudo corregir desde esta sesión. No leas ni copies valores en logs.
+Antes de considerar completa la distribución, verifica en **feispla/vantcall-desktop-App → Settings → Secrets and variables → Actions** estos cuatro valores: `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`, `MIRROR_PUBLISH_TOKEN` (Secrets) y `VANTCALL_UPDATER_PUBKEY_B64` (Variable recomendada; el workflow también acepta Secret). La creación y el guardado de `MIRROR_PUBLISH_TOKEN` se completaron en esta sesión; la variable pública y el contenido de la clave privada pasan sus pasos previos. El run `v0.1.0` falló por el CR/LF final de la clave y `v0.1.1` corrigió eso, pero los cuatro jobs ahora fallan en Tauri con `incorrect updater private key password: Wrong password for that key`. Esto confirma que `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` no coincide con la contraseña usada para cifrar la clave privada local. La CLI de GitHub devuelve `403 Resource not accessible by integration` al listar los nombres de secrets/variables y la página autenticada de Settings agotó el tiempo, por lo que no se pudo corregir desde esta sesión. No leas ni copies valores en logs.
 
 **Acción:** sustituye `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` en GitHub por la contraseña exacta de la clave existente (sin regenerar ni rotar la clave). Después abre [el run fallido v0.1.1](https://github.com/feispla/vantcall-desktop-App/actions/runs/36682801564) y usa **Re-run all jobs**. El tag `v0.1.1` ya existe: no lo muevas ni uses force-push. El run falló antes de que se creara un draft, así que al pasar creará el borrador normalmente. El token del mirror aún no llegó a usarse en un upload.
 
@@ -35,6 +35,11 @@ No hay claves Riot o Steam disponibles para el proyecto en el código del client
 3. Confirmar los identificadores verificables y el alcance de consentimiento de cada cuenta antes de añadir botones de vinculación; definir retención y frecuencia de sync antes de programar la Edge Function cada 15 minutos.
 
 Las claves deben permanecer en Supabase Edge Functions; nunca en `VITE_*`, el bundle Tauri, Actions Variables públicas o SQLite. Sin la aprobación Riot, los secretos y una fuente CS2 documentada, no se implementan llamadas de juego que puedan devolver datos inventados o que fallen silenciosamente.
+
+## Otros pendientes de esta sesión
+
+- El push de `main` informó que GitHub tiene una alerta abierta de Dependabot de severidad moderada. La API de alertas devuelve `403 Resource not accessible by integration`, así que el propietario debe revisar **Security → Dependabot alerts** en GitHub y decidir el upgrade.
+- La copia local de Windows no se sincronizó: el Computer Operator conectado es anterior a Manus Desktop 0.6.0 y es incompatible con las operaciones Work Locally. Actualiza Manus Desktop y reconecta antes de solicitar la sincronización; no se ejecutaron comandos ni escrituras en ese equipo.
 
 ## Firma de instaladores
 
