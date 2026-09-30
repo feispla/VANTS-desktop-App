@@ -14,3 +14,5 @@
 .rank-progress-placeholder{height:7px;background:linear-gradient(90deg,#26262a,#2c2c30);border-radius:9px}
 
 .native-settings-card{margin-top:16px;max-width:760px}.native-settings-card .setting-row:last-child{border-bottom:0}.native-settings-card .setting-row>div{max-width:560px}.native-settings-card .toggle{flex-shrink:0}.setting-row .toggle:focus-visible{outline:2px solid var(--red-bright);outline-offset:3px}
+
+.updater-settings-card{margin-top:16px;max-width:760px;padding:0 22px}.updater-settings-card .setting-row{padding:20px 0 16px}.updater-actions{display:flex;gap:10px;flex-wrap:wrap;padding:0 0 14px}.updater-actions button:disabled{opacity:.48;cursor:not-allowed}.updater-progress,.updater-message{font-size:11px;line-height:1.55;color:#a7a7ae;margin:0 0 13px}.updater-message.is-error{color:#ff858c}.updater-settings-card .setup-note{margin:0 0 17px}

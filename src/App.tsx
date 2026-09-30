@@ -10,9 +10,11 @@ import { supabaseProjectReady, missingSupabaseSettings } from './lib/config'
 import { openLocalDatabase, type LocalDatabase, type LocalNotification } from './lib/database'
 import { requestCompetitiveNotificationPermission, sendCompetitiveNotification } from './lib/notifications'
 import { createAuthStorage } from './lib/secure-storage'
+import { checkForDesktopUpdate, installDesktopUpdate, updaterBuildEnabled, type DesktopDownloadEvent, type DesktopUpdate } from './lib/updater'
 
 type Page = 'dashboard' | 'matches' | 'tournaments' | 'profile' | 'settings'
 type Toast = { kind: 'success' | 'error' | 'info'; message: string }
+type UpdaterState = 'idle' | 'unavailable' | 'checking' | 'current' | 'available' | 'installing' | 'installed' | 'error'
 type Workspace = {
   client: SupabaseClient
   db: LocalDatabase
@@ -120,9 +122,15 @@ function App() {
   const [authBusy, setAuthBusy] = useState(false)
   const [initError, setInitError] = useState('')
   const [notificationsEnabled, setNotificationsEnabled] = useState(true)
+  const [updaterState, setUpdaterState] = useState<UpdaterState>('idle')
+  const [updaterVersion, setUpdaterVersion] = useState('')
+  const [updaterMessage, setUpdaterMessage] = useState('')
+  const [updaterProgress, setUpdaterProgress] = useState<number | null>(null)
   const refreshInFlightRef = useRef(false)
   const notificationEnabledRef = useRef(true)
   const notificationSnapshotRef = useRef<NotificationSnapshot | null>(null)
+  const updaterRef = useRef<DesktopUpdate | null>(null)
+  const updaterInFlightRef = useRef(false)
 
   const refresh = useCallback(async (client: SupabaseClient, db: LocalDatabase, session: Session | null, silent = false) => {
     if (refreshInFlightRef.current) return
@@ -283,10 +291,74 @@ function App() {
   }, [])
 
   const pageTitle = useMemo(() => ({ dashboard: 'Resumen competitivo', matches: 'Historial de partidas', tournaments: 'Torneos', profile: 'Mi perfil', settings: 'Ajustes' })[page], [page])
-  const notify = (kind: Toast['kind'], message: string) => {
+  const notify = useCallback((kind: Toast['kind'], message: string) => {
     setToast({ kind, message })
     window.setTimeout(() => setToast(null), 4200)
-  }
+  }, [])
+  const handleCheckForUpdates = useCallback(async (silent = false) => {
+    if (!isTauri() || !updaterBuildEnabled) {
+      const message = 'El feed firmado se activará cuando se configure el mirror de distribución.'
+      setUpdaterState('unavailable')
+      setUpdaterMessage(message)
+      if (!silent) notify('info', message)
+      return
+    }
+    if (updaterInFlightRef.current) return
+    updaterInFlightRef.current = true
+    setUpdaterState('checking')
+    setUpdaterMessage('')
+    setUpdaterProgress(null)
+    try {
+      const next = await checkForDesktopUpdate()
+      const previous = updaterRef.current
+      updaterRef.current = next
+      if (previous && previous !== next) await previous.close().catch(() => undefined)
+      if (next) {
+        setUpdaterVersion(next.version)
+        setUpdaterState('available')
+        setUpdaterMessage(`Versión ${next.version} lista para revisar e instalar.`)
+        notify('info', `VANTCALL Desktop ${next.version} está disponible.`)
+      } else {
+        setUpdaterVersion('')
+        setUpdaterState('current')
+        setUpdaterMessage('Tienes instalada la versión más reciente publicada.')
+        if (!silent) notify('success', 'VANTCALL Desktop está actualizado.')
+      }
+    } catch (error) {
+      setUpdaterState('error')
+      setUpdaterMessage(error instanceof Error ? error.message : 'No se pudo consultar el feed firmado.')
+      if (!silent) notify('error', 'No se pudo consultar el feed de actualizaciones.')
+    } finally {
+      updaterInFlightRef.current = false
+    }
+  }, [notify])
+  const handleInstallUpdate = useCallback(async () => {
+    const update = updaterRef.current
+    if (!update) return
+    setUpdaterState('installing')
+    setUpdaterProgress(0)
+    setUpdaterMessage('Descargando y verificando la firma del instalador…')
+    let downloaded = 0
+    try {
+      await installDesktopUpdate(update, (event: DesktopDownloadEvent) => {
+        if (event.event === 'Started') setUpdaterProgress(0)
+        if (event.event === 'Progress') {
+          downloaded += event.data.chunkLength
+          setUpdaterProgress(downloaded)
+        }
+      })
+      updaterRef.current = null
+      await update.close().catch(() => undefined)
+      setUpdaterVersion('')
+      setUpdaterState('installed')
+      setUpdaterMessage('Actualización instalada. La aplicación se reiniciará para finalizar.')
+      notify('success', 'Actualización instalada correctamente.')
+    } catch (error) {
+      setUpdaterState('available')
+      setUpdaterMessage(error instanceof Error ? error.message : 'No se pudo instalar la actualización firmada.')
+      notify('error', 'No se pudo instalar la actualización.')
+    }
+  }, [notify])
   const handleToggleNotifications = async () => {
     const next = !notificationsEnabled
     if (next && !isTauri()) {
@@ -332,6 +404,14 @@ function App() {
     else notify('success', 'Sesión cerrada y caché privada local eliminada.')
   }
 
+  useEffect(() => {
+    if (!isTauri() || !updaterBuildEnabled) return
+    const timer = window.setTimeout(() => { void handleCheckForUpdates(true) }, 4_000)
+    return () => window.clearTimeout(timer)
+  }, [handleCheckForUpdates])
+
+  useEffect(() => () => { void updaterRef.current?.close().catch(() => undefined) }, [])
+
   const accountName = workspace?.profile?.display_name || workspace?.profile?.username || String(workspace?.session?.user.user_metadata?.full_name || workspace?.session?.user.user_metadata?.name || '') || 'Cuenta VANTCALL'
   const initials = accountName.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]).join('').toUpperCase() || 'V'
   const dataMode = workspace?.stale ? 'Caché local' : workspace?.errors.length ? 'Conexión limitada' : workspace?.session ? 'Supabase · sesión' : 'Supabase · público'
@@ -355,7 +435,7 @@ function App() {
         {!initError && page === 'matches' && <MatchesPage workspace={workspace} onLogin={() => void handleDiscordLogin()} />}
         {!initError && page === 'tournaments' && <TournamentsPage workspace={workspace} refreshing={refreshing} onRefresh={() => workspace && void refresh(workspace.client, workspace.db, workspace.session)} />}
         {!initError && page === 'profile' && <ProfilePage workspace={workspace} onLogin={() => void handleDiscordLogin()} />}
-        {!initError && page === 'settings' && <><SettingsPage workspace={workspace} onLogin={() => void handleDiscordLogin()} onSignOut={() => void handleSignOut()} /><NativeSettingsPanel enabled={notificationsEnabled} onToggle={() => void handleToggleNotifications()} isDesktop={isTauri()} /></>}
+        {!initError && page === 'settings' && <><SettingsPage workspace={workspace} onLogin={() => void handleDiscordLogin()} onSignOut={() => void handleSignOut()} /><NativeSettingsPanel enabled={notificationsEnabled} onToggle={() => void handleToggleNotifications()} isDesktop={isTauri()} /><UpdaterSettingsPanel enabled={updaterBuildEnabled} isDesktop={isTauri()} status={updaterState} version={updaterVersion} message={updaterMessage} progress={updaterProgress} onCheck={() => void handleCheckForUpdates()} onInstall={() => void handleInstallUpdate()} /></>}
       </div>
     </main>
     {toast && <div className={`toast toast-${toast.kind}`} role="status"><span className="toast-check">{toast.kind === 'error' ? '!' : toast.kind === 'info' ? 'i' : '✓'}</span>{toast.message}</div>}
@@ -451,6 +531,28 @@ function ProfilePage({ workspace, onLogin }: { workspace: Workspace | null; onLo
 
 function SettingsPage({ workspace, onLogin, onSignOut }: { workspace: Workspace | null; onLogin: () => void; onSignOut: () => void }) {
   return <><section className="hero-heading"><div><p className="eyebrow">CUENTA</p><h1>Ajustes</h1><p className="subtitle">Configuración local y estado de la conexión a datos reales.</p></div></section><div className="settings-card card"><div className="setting-row"><div><strong>Cuenta Discord</strong><span>{workspace?.session ? `Conectada · ${workspace.profile?.username || 'perfil por vincular'}` : 'No hay una sesión autenticada.'}</span></div>{workspace?.session ? <button className="secondary-button" onClick={onSignOut}>Cerrar sesión</button> : <button className="secondary-button" onClick={onLogin}><DiscordMark /> Conectar</button>}</div><div className="setting-row"><div><strong>Modo sin conexión</strong><span>Las últimas respuestas reales se guardan en SQLite; no se crean datos ficticios.</span></div><span className="setting-state">{workspace?.stale ? 'Caché en uso' : 'Preparado'}</span></div><div className="setting-row"><div><strong>Navegación recordada</strong><span>La última sección abierta se guarda localmente en SQLite.</span></div><span className="setting-state state-good">Activa</span></div><div className="setting-row"><div><strong>Versión del cliente</strong><span>VANTCALL Desktop 0.1.0 · Sprint 1</span></div><span className="setting-state">Tauri 2</span></div><div className="setting-row"><div><strong>Integración Supabase</strong><span>{supabaseProjectReady ? 'Proyecto VANTSBETA · lectura con clave pública y sesión autenticada.' : `Configuración pendiente: ${missingSupabaseSettings.join(', ')}`}</span></div><span className={`setting-state ${supabaseProjectReady ? 'state-good' : 'state-warn'}`}>{supabaseProjectReady ? 'Conectable' : 'Pendiente'}</span></div><div className="setup-note"><strong>Discord OAuth</strong><p>En Supabase Auth activa el proveedor Discord y añade <code>http://localhost:*/**</code> a Redirect URLs. La app intercambia el código PKCE y conserva tokens únicamente en Stronghold; la clave de Discord permanece en Supabase.</p></div></div></>
+}
+
+function UpdaterSettingsPanel({ enabled, isDesktop, status, version, message, progress, onCheck, onInstall }: { enabled: boolean; isDesktop: boolean; status: UpdaterState; version: string; message: string; progress: number | null; onCheck: () => void; onInstall: () => void }) {
+  const statusLabel: Record<UpdaterState, string> = {
+    idle: 'Listo', unavailable: 'Pendiente de configuración', checking: 'Comprobando…', current: 'Actualizado',
+    available: `Versión ${version} disponible`, installing: 'Instalando…', installed: 'Instalado', error: 'No disponible',
+  }
+  const canCheck = isDesktop && enabled && status !== 'checking' && status !== 'installing'
+  return <div className="settings-card card updater-settings-card">
+    <div className="setting-row">
+      <div><strong>Actualizaciones firmadas</strong><span>Consulta el feed público de instaladores y valida la firma antes de instalar. La descarga se inicia solo al pulsar Instalar.</span></div>
+      <span className={`setting-state ${status === 'available' || status === 'current' ? 'state-good' : enabled ? '' : 'state-warn'}`}>{!isDesktop ? 'Solo escritorio' : statusLabel[status]}</span>
+    </div>
+    <div className="updater-actions">
+      <button className="secondary-button" onClick={onCheck} disabled={!canCheck}>{status === 'checking' ? 'Comprobando…' : 'Buscar actualizaciones'}</button>
+      {status === 'available' && <button className="primary-button" onClick={onInstall}>Instalar {version}</button>}
+    </div>
+    {status === 'installing' && progress !== null && <p className="updater-progress">Descargados {(progress / 1024).toFixed(0)} KB; verificando firma…</p>}
+    {message && <p className={`updater-message ${status === 'error' ? 'is-error' : ''}`} role="status">{message}</p>}
+    {!enabled && <p className="setup-note">El feed de release se habilita en builds firmados una vez configurados los secretos y la clave pública del mirror.</p>}
+    {enabled && <p className="setup-note">Los clientes consultan latest.json en GitHub Releases. Solo las releases publicadas son visibles; los borradores no se instalan.</p>}
+  </div>
 }
 
 function NativeSettingsPanel({ enabled, onToggle, isDesktop }: { enabled: boolean; onToggle: () => void; isDesktop: boolean }) {
