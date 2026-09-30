@@ -126,7 +126,7 @@ jobs:
       - name: Prepare signed updater configuration
         run: node scripts/prepare-updater-config.mjs
         env:
-          VANTCALL_UPDATER_PUBKEY_B64: ${{ vars.VANTCALL_UPDATER_PUBKEY_B64 }}
+          VANTCALL_UPDATER_PUBKEY_B64: ${{ secrets.VANTCALL_UPDATER_PUBKEY_B64 || vars.VANTCALL_UPDATER_PUBKEY_B64 }}
           WINDOWS_TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}
 
       - name: Build and upload a private-review draft to the artifact-only mirror
