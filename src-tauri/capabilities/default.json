@@ -12,6 +12,8 @@
     "notification:default",
     "updater:default",
     "process:default",
+    "deep-link:default",
+    "core:event:default",
     "sql:default",
     "sql:allow-execute"
   ]

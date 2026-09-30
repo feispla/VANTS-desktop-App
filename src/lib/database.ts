@@ -3,6 +3,10 @@ import Database from '@tauri-apps/plugin-sql'
 
 type SqlValue = string | number | boolean | null
 
+export type AnalyticsFeature = 'dashboard' | 'matches' | 'tournaments' | 'profile' | 'settings'
+export type AnalyticsEventName = 'session_start' | 'feature_used'
+export type AnonymousAnalyticsSummary = { sessions: number; features: number }
+
 export interface LocalDatabase {
   readCache<T>(cacheKey: string, userId: string): Promise<T | null>
   writeCache(cacheKey: string, userId: string, value: unknown): Promise<void>
@@ -13,6 +17,9 @@ export interface LocalDatabase {
   listNotifications(): Promise<LocalNotification[]>
   hasNotification(id: string): Promise<boolean>
   saveNotification(notification: LocalNotification): Promise<void>
+  recordAnalyticsEvent(eventName: AnalyticsEventName, feature?: AnalyticsFeature): Promise<void>
+  getAnalyticsSummary(): Promise<AnonymousAnalyticsSummary>
+  clearAnalyticsEvents(): Promise<void>
 }
 
 export interface LocalNotification {
@@ -27,6 +34,7 @@ export interface LocalNotification {
 const memoryCache = new Map<string, unknown>()
 const memorySettings = new Map<string, string>()
 const memoryNotifications: LocalNotification[] = []
+const memoryAnalytics: Array<{ eventName: AnalyticsEventName; feature?: AnalyticsFeature }> = []
 
 class MemoryDatabase implements LocalDatabase {
   async readCache<T>(cacheKey: string, userId: string): Promise<T | null> {
@@ -44,6 +52,16 @@ class MemoryDatabase implements LocalDatabase {
   async saveNotification(notification: LocalNotification): Promise<void> {
     if (!await this.hasNotification(notification.id)) memoryNotifications.unshift(notification)
   }
+  async recordAnalyticsEvent(eventName: AnalyticsEventName, feature?: AnalyticsFeature): Promise<void> {
+    memoryAnalytics.push({ eventName, feature })
+  }
+  async getAnalyticsSummary(): Promise<AnonymousAnalyticsSummary> {
+    return {
+      sessions: memoryAnalytics.filter((event) => event.eventName === 'session_start').length,
+      features: memoryAnalytics.filter((event) => event.eventName === 'feature_used').length,
+    }
+  }
+  async clearAnalyticsEvents(): Promise<void> { memoryAnalytics.length = 0 }
 }
 
 class SqliteDatabase implements LocalDatabase {
@@ -131,6 +149,25 @@ class SqliteDatabase implements LocalDatabase {
       'INSERT OR IGNORE INTO notifications (id, kind, title, body, created_at, read_at) VALUES ($1, $2, $3, $4, $5, $6)',
       [notification.id, notification.kind, notification.title, notification.body, notification.created_at, notification.read_at],
     )
+  }
+
+  async recordAnalyticsEvent(eventName: AnalyticsEventName, feature?: AnalyticsFeature): Promise<void> {
+    await this.db.execute(
+      'INSERT INTO anonymous_analytics (event_name, feature) VALUES ($1, $2)',
+      [eventName, feature ?? null],
+    )
+  }
+
+  async getAnalyticsSummary(): Promise<AnonymousAnalyticsSummary> {
+    const rows = await this.db.select<Array<{ event_name: AnalyticsEventName; count: number | string }>>(
+      'SELECT event_name, COUNT(*) AS count FROM anonymous_analytics GROUP BY event_name',
+    )
+    const counts = new Map(rows.map((row) => [row.event_name, Number(row.count)]))
+    return { sessions: counts.get('session_start') ?? 0, features: counts.get('feature_used') ?? 0 }
+  }
+
+  async clearAnalyticsEvents(): Promise<void> {
+    await this.db.execute('DELETE FROM anonymous_analytics')
   }
 }
 

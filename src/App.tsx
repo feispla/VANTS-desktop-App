@@ -3,11 +3,12 @@ import { Bell, ChevronDown, CircleHelp, Crown, Gamepad2, LayoutDashboard, LogOut
 import type { Session, SupabaseClient } from '@supabase/supabase-js'
 import { isTauri } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
+import { getCurrent, onOpenUrl } from '@tauri-apps/plugin-deep-link'
 import './App.css'
 import { fetchMatches, fetchProfile, fetchQueue, fetchRank, fetchTournaments, type CompetitiveRank, type PlayerProfile, type QueueEntry, type RankedMatch, type Tournament } from './lib/api'
 import { createSupabaseClient, signInWithDiscord } from './lib/auth'
 import { supabaseProjectReady, missingSupabaseSettings } from './lib/config'
-import { openLocalDatabase, type LocalDatabase, type LocalNotification } from './lib/database'
+import { openLocalDatabase, type AnalyticsFeature, type AnonymousAnalyticsSummary, type LocalDatabase, type LocalNotification } from './lib/database'
 import { requestCompetitiveNotificationPermission, sendCompetitiveNotification } from './lib/notifications'
 import { createAuthStorage } from './lib/secure-storage'
 import { checkForDesktopUpdate, installDesktopUpdate, updaterBuildEnabled, type DesktopDownloadEvent, type DesktopUpdate } from './lib/updater'
@@ -15,6 +16,7 @@ import { checkForDesktopUpdate, installDesktopUpdate, updaterBuildEnabled, type 
 type Page = 'dashboard' | 'matches' | 'tournaments' | 'profile' | 'settings'
 type Toast = { kind: 'success' | 'error' | 'info'; message: string }
 type UpdaterState = 'idle' | 'unavailable' | 'checking' | 'current' | 'available' | 'installing' | 'installed' | 'error'
+type Theme = 'dark' | 'light'
 type Workspace = {
   client: SupabaseClient
   db: LocalDatabase
@@ -37,6 +39,7 @@ const EMPTY_WORKSPACE: Omit<Workspace, 'client' | 'db'> = {
   session: null, profile: null, matches: [], rank: null, queue: null, tournaments: [],
   notifications: [], errors: [], stale: false,
 }
+const EMPTY_ANALYTICS_SUMMARY: AnonymousAnalyticsSummary = { sessions: 0, features: 0 }
 
 const navItems: { id: Page; label: string; icon: typeof LayoutDashboard }[] = [
   { id: 'dashboard', label: 'Inicio', icon: LayoutDashboard },
@@ -122,15 +125,45 @@ function App() {
   const [authBusy, setAuthBusy] = useState(false)
   const [initError, setInitError] = useState('')
   const [notificationsEnabled, setNotificationsEnabled] = useState(true)
+  const [theme, setTheme] = useState<Theme>('dark')
+  const [isOnline, setIsOnline] = useState(() => navigator.onLine)
+  const [analyticsEnabled, setAnalyticsEnabled] = useState(false)
+  const [analyticsSummary, setAnalyticsSummary] = useState<AnonymousAnalyticsSummary>(EMPTY_ANALYTICS_SUMMARY)
+  const [focusedMatchId, setFocusedMatchId] = useState<string | null>(null)
   const [updaterState, setUpdaterState] = useState<UpdaterState>('idle')
   const [updaterVersion, setUpdaterVersion] = useState('')
   const [updaterMessage, setUpdaterMessage] = useState('')
   const [updaterProgress, setUpdaterProgress] = useState<number | null>(null)
   const refreshInFlightRef = useRef(false)
+  const previousOnlineRef = useRef(isOnline)
+  const localDatabaseRef = useRef<LocalDatabase | null>(null)
   const notificationEnabledRef = useRef(true)
+  const analyticsEnabledRef = useRef(false)
+  const analyticsSessionRecordedRef = useRef(false)
+  const deepLinkOpenedRef = useRef(false)
+  const lastDeepLinkRef = useRef<{ url: string; at: number } | null>(null)
   const notificationSnapshotRef = useRef<NotificationSnapshot | null>(null)
   const updaterRef = useRef<DesktopUpdate | null>(null)
   const updaterInFlightRef = useRef(false)
+
+  useEffect(() => {
+    const handleOnline = () => setIsOnline(true)
+    const handleOffline = () => setIsOnline(false)
+    window.addEventListener('online', handleOnline)
+    window.addEventListener('offline', handleOffline)
+    return () => {
+      window.removeEventListener('online', handleOnline)
+      window.removeEventListener('offline', handleOffline)
+    }
+  }, [])
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme
+  }, [theme])
+
+  useEffect(() => {
+    localDatabaseRef.current = workspace?.db ?? null
+  }, [workspace?.db])
 
   const refresh = useCallback(async (client: SupabaseClient, db: LocalDatabase, session: Session | null, silent = false) => {
     if (refreshInFlightRef.current) return
@@ -220,10 +253,21 @@ function App() {
         const client = createSupabaseClient(storage)
         const savedPage = await db.getSetting('last_page').catch(() => null)
         const savedNotifications = await db.getSetting('notifications_enabled').catch(() => null)
+        const savedTheme = await db.getSetting('theme').catch(() => null)
+        const savedAnalytics = await db.getSetting('anonymous_analytics_enabled').catch(() => null)
         const notificationsAreEnabled = savedNotifications !== 'false'
         notificationEnabledRef.current = notificationsAreEnabled
         setNotificationsEnabled(notificationsAreEnabled)
-        if (savedPage && ['dashboard', 'matches', 'tournaments', 'profile', 'settings'].includes(savedPage)) setPage(savedPage as Page)
+        if (savedTheme === 'dark' || savedTheme === 'light') setTheme(savedTheme)
+        const analyticsAreEnabled = savedAnalytics === 'true'
+        analyticsEnabledRef.current = analyticsAreEnabled
+        setAnalyticsEnabled(analyticsAreEnabled)
+        if (analyticsAreEnabled && !analyticsSessionRecordedRef.current) {
+          analyticsSessionRecordedRef.current = true
+          await db.recordAnalyticsEvent('session_start').catch(() => { analyticsSessionRecordedRef.current = false })
+        }
+        setAnalyticsSummary(await db.getAnalyticsSummary().catch(() => EMPTY_ANALYTICS_SUMMARY))
+        if (!deepLinkOpenedRef.current && savedPage && ['dashboard', 'matches', 'tournaments', 'profile', 'settings'].includes(savedPage)) setPage(savedPage as Page)
         if (disposed) return
 
         const { data, error } = await client.auth.getSession()
@@ -273,6 +317,12 @@ function App() {
     }, 60_000)
     return () => window.clearInterval(timer)
   }, [pollingClient, pollingDb, pollingSession, refresh])
+
+  useEffect(() => {
+    const reconnected = !previousOnlineRef.current && isOnline
+    previousOnlineRef.current = isOnline
+    if (reconnected && pollingClient && pollingDb) void refresh(pollingClient, pollingDb, pollingSession, true)
+  }, [isOnline, pollingClient, pollingDb, pollingSession, refresh])
 
   useEffect(() => {
     if (!isTauri()) return
@@ -374,7 +424,98 @@ function App() {
     await workspace?.db.setSetting('notifications_enabled', String(next)).catch(() => undefined)
     notify('success', next ? 'Notificaciones competitivas activadas.' : 'Notificaciones competitivas desactivadas.')
   }
-  const navigate = (next: Page) => { setPage(next); setMobileOpen(false); void workspace?.db.setSetting('last_page', next) }
+  const handleToggleTheme = () => {
+    const next: Theme = theme === 'dark' ? 'light' : 'dark'
+    setTheme(next)
+    void workspace?.db.setSetting('theme', next).catch(() => notify('error', 'No se pudo guardar el tema en este dispositivo.'))
+  }
+  const handleToggleAnalytics = async () => {
+    if (!workspace) return
+    const next = !analyticsEnabled
+    try {
+      await workspace.db.setSetting('anonymous_analytics_enabled', String(next))
+      analyticsEnabledRef.current = next
+      setAnalyticsEnabled(next)
+      if (next && !analyticsSessionRecordedRef.current) {
+        analyticsSessionRecordedRef.current = true
+        await workspace.db.recordAnalyticsEvent('session_start').catch(() => { analyticsSessionRecordedRef.current = false })
+      }
+      setAnalyticsSummary(await workspace.db.getAnalyticsSummary())
+      notify('success', next ? 'Analítica local anónima activada; no se envía al servidor.' : 'Se detuvo el registro de nuevos eventos analíticos.')
+    } catch {
+      notify('error', 'No se pudo guardar la preferencia analítica en SQLite.')
+    }
+  }
+  const handleClearAnalytics = async () => {
+    if (!workspace) return
+    try {
+      await workspace.db.clearAnalyticsEvents()
+      analyticsSessionRecordedRef.current = false
+      setAnalyticsSummary(EMPTY_ANALYTICS_SUMMARY)
+      notify('success', 'Se borraron todos los eventos analíticos locales.')
+    } catch {
+      notify('error', 'No se pudieron borrar los registros analíticos locales.')
+    }
+  }
+  const recordFeatureUse = useCallback((feature: AnalyticsFeature) => {
+    const db = workspace?.db
+    if (!analyticsEnabledRef.current || !db) return
+    void db.recordAnalyticsEvent('feature_used', feature)
+      .then(() => db.getAnalyticsSummary())
+      .then(setAnalyticsSummary)
+      .catch(() => undefined)
+  }, [workspace?.db])
+  const navigate = (next: Page) => {
+    setPage(next)
+    setMobileOpen(false)
+    void workspace?.db.setSetting('last_page', next)
+    recordFeatureUse(next)
+  }
+  const handleDeepLink = useCallback((rawUrl: string) => {
+    try {
+      const url = new URL(rawUrl)
+      if (url.protocol !== 'vants:' || url.hostname.toLowerCase() !== 'match') return
+      const encodedId = url.pathname.split('/').filter(Boolean)[0]
+      if (!encodedId) return
+      const matchId = decodeURIComponent(encodedId)
+      if (!/^[\w.-]{1,128}$/.test(matchId)) return
+      const previous = lastDeepLinkRef.current
+      const now = Date.now()
+      if (previous?.url === rawUrl && now - previous.at < 1_500) return
+      lastDeepLinkRef.current = { url: rawUrl, at: now }
+      deepLinkOpenedRef.current = true
+      setFocusedMatchId(matchId)
+      setPage('matches')
+      setMobileOpen(false)
+      void localDatabaseRef.current?.setSetting('last_page', 'matches')
+      recordFeatureUse('matches')
+      notify('info', `Abriendo el historial para la partida ${matchId}…`)
+    } catch {
+      // Los argumentos de proceso externos no son URLs confiables; los que no se puedan parsear se ignoran.
+    }
+  }, [notify, recordFeatureUse])
+
+  useEffect(() => {
+    if (!isTauri()) return
+    let cancelled = false
+    let unlistenOpenUrl: (() => void) | undefined
+    let unlistenForwarded: (() => void) | undefined
+    const acceptUrls = (urls: string[]) => urls.forEach(handleDeepLink)
+    void onOpenUrl(acceptUrls).then((unlisten) => {
+      if (cancelled) unlisten()
+      else unlistenOpenUrl = unlisten
+    }).catch(() => undefined)
+    void listen<string>('deep-link-forwarded', (event) => handleDeepLink(event.payload)).then((unlisten) => {
+      if (cancelled) unlisten()
+      else unlistenForwarded = unlisten
+    }).catch(() => undefined)
+    void getCurrent().then((urls) => { if (urls) acceptUrls(urls) }).catch(() => undefined)
+    return () => {
+      cancelled = true
+      unlistenOpenUrl?.()
+      unlistenForwarded?.()
+    }
+  }, [handleDeepLink])
 
   const handleDiscordLogin = async () => {
     if (!workspace) return
@@ -414,7 +555,7 @@ function App() {
 
   const accountName = workspace?.profile?.display_name || workspace?.profile?.username || String(workspace?.session?.user.user_metadata?.full_name || workspace?.session?.user.user_metadata?.name || '') || 'Cuenta VANTCALL'
   const initials = accountName.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]).join('').toUpperCase() || 'V'
-  const dataMode = workspace?.stale ? 'Caché local' : workspace?.errors.length ? 'Conexión limitada' : workspace?.session ? 'Supabase · sesión' : 'Supabase · público'
+  const dataMode = !isOnline ? (workspace?.stale ? 'Sin conexión · caché local' : 'Sin conexión') : workspace?.stale ? 'Caché local' : workspace?.errors.length ? 'Conexión limitada' : workspace?.session ? 'Supabase · sesión' : 'Supabase · público'
 
   if (initializing) return <Splash message="Preparando tu espacio competitivo…" />
 
@@ -427,15 +568,15 @@ function App() {
     </aside>
 
     <main className="main-content">
-      <header className="topbar"><button className="icon-button menu-mobile" onClick={() => setMobileOpen(true)} aria-label="Abrir menú"><Menu size={20} /></button><div className="breadcrumb"><span>VANTCALL</span><span className="slash">/</span><strong>{pageTitle}</strong></div><div className="connection-chip"><span className={`connection-dot ${workspace?.stale ? 'warning' : ''}`} />{dataMode}</div><div className="top-actions"><button className="icon-button" onClick={() => setNotificationsOpen((value) => !value)} aria-label="Notificaciones"><Bell size={19} />{workspace?.notifications.length ? <span className="notification-dot" /> : null}</button><Avatar initials={initials} url={workspace?.profile?.avatar_url || String(workspace?.session?.user.user_metadata?.avatar_url || '')} /></div>{notificationsOpen && <div className="notification-popover"><strong>Notificaciones locales</strong>{workspace?.notifications.length ? workspace.notifications.map((item) => <p key={item.id}><span className="notification-red" />{item.title}<small>{item.body}</small></p>) : <p className="muted-copy">No hay notificaciones guardadas.</p>}</div>}</header>
+      <header className="topbar"><button className="icon-button menu-mobile" onClick={() => setMobileOpen(true)} aria-label="Abrir menú"><Menu size={20} /></button><div className="breadcrumb"><span>VANTCALL</span><span className="slash">/</span><strong>{pageTitle}</strong></div><div className="connection-chip" role="status"><span className={`connection-dot ${!isOnline || workspace?.stale ? 'warning' : ''}`} />{dataMode}</div><div className="top-actions"><button className="icon-button" onClick={() => setNotificationsOpen((value) => !value)} aria-label="Notificaciones"><Bell size={19} />{workspace?.notifications.length ? <span className="notification-dot" /> : null}</button><Avatar initials={initials} url={workspace?.profile?.avatar_url || String(workspace?.session?.user.user_metadata?.avatar_url || '')} /></div>{notificationsOpen && <div className="notification-popover"><strong>Notificaciones locales</strong>{workspace?.notifications.length ? workspace.notifications.map((item) => <p key={item.id}><span className="notification-red" />{item.title}<small>{item.body}</small></p>) : <p className="muted-copy">No hay notificaciones guardadas.</p>}</div>}</header>
       <div className="page-wrap">
         {initError && <div className="alert-card" role="alert"><strong>No se pudo conectar</strong><p>{initError}</p><button className="secondary-button" onClick={() => window.location.reload()}>Volver a intentar</button></div>}
         {workspace?.errors.map((error, index) => <div className={`inline-alert ${workspace.stale ? 'is-warning' : ''}`} key={`${index}-${error}`}><ShieldCheck size={16} /><span>{error}</span></div>)}
         {!initError && page === 'dashboard' && <Dashboard workspace={workspace} refreshing={refreshing} onRefresh={() => workspace && void refresh(workspace.client, workspace.db, workspace.session)} onLogin={() => void handleDiscordLogin()} onNavigate={navigate} />}
-        {!initError && page === 'matches' && <MatchesPage workspace={workspace} onLogin={() => void handleDiscordLogin()} />}
+        {!initError && page === 'matches' && <MatchesPage workspace={workspace} onLogin={() => void handleDiscordLogin()} focusedMatchId={focusedMatchId} onClearFocus={() => setFocusedMatchId(null)} />}
         {!initError && page === 'tournaments' && <TournamentsPage workspace={workspace} refreshing={refreshing} onRefresh={() => workspace && void refresh(workspace.client, workspace.db, workspace.session)} />}
         {!initError && page === 'profile' && <ProfilePage workspace={workspace} onLogin={() => void handleDiscordLogin()} />}
-        {!initError && page === 'settings' && <><SettingsPage workspace={workspace} onLogin={() => void handleDiscordLogin()} onSignOut={() => void handleSignOut()} /><NativeSettingsPanel enabled={notificationsEnabled} onToggle={() => void handleToggleNotifications()} isDesktop={isTauri()} /><UpdaterSettingsPanel enabled={updaterBuildEnabled} isDesktop={isTauri()} status={updaterState} version={updaterVersion} message={updaterMessage} progress={updaterProgress} onCheck={() => void handleCheckForUpdates()} onInstall={() => void handleInstallUpdate()} /></>}
+        {!initError && page === 'settings' && <><SettingsPage workspace={workspace} onLogin={() => void handleDiscordLogin()} onSignOut={() => void handleSignOut()} theme={theme} onToggleTheme={handleToggleTheme} isOnline={isOnline} /><NativeSettingsPanel enabled={notificationsEnabled} onToggle={() => void handleToggleNotifications()} isDesktop={isTauri()} /><AnalyticsSettingsPanel enabled={analyticsEnabled} summary={analyticsSummary} onToggle={() => void handleToggleAnalytics()} onClear={() => void handleClearAnalytics()} isDesktop={isTauri()} /><UpdaterSettingsPanel enabled={updaterBuildEnabled} isDesktop={isTauri()} status={updaterState} version={updaterVersion} message={updaterMessage} progress={updaterProgress} onCheck={() => void handleCheckForUpdates()} onInstall={() => void handleInstallUpdate()} /></>}
       </div>
     </main>
     {toast && <div className={`toast toast-${toast.kind}`} role="status"><span className="toast-check">{toast.kind === 'error' ? '!' : toast.kind === 'info' ? 'i' : '✓'}</span>{toast.message}</div>}
@@ -469,11 +610,11 @@ function Dashboard({ workspace, refreshing, onRefresh, onLogin, onNavigate }: { 
   </>
 }
 
-function MatchRow({ match }: { match: RankedMatch }) {
+function MatchRow({ match, highlighted = false }: { match: RankedMatch; highlighted?: boolean }) {
   const resultLabel = match.outcome === 'victory' ? 'Victoria' : match.outcome === 'defeat' ? 'Derrota' : match.outcome === 'draw' ? 'Empate' : match.outcome === 'cancelled' ? 'Cancelada' : statusName(match.status)
   const positive = match.mmrChange != null && match.mmrChange > 0
   const mmrLabel = match.mmrChange == null ? '— MMR' : `${match.mmrChange > 0 ? '+' : ''}${match.mmrChange} MMR`
-  return <div className="table-row"><div className="match-cell"><div className="game-square">V</div><div><strong>Partida clasificatoria</strong><span>{match.opponent}</span></div></div><div><span className={`result ${match.outcome === 'victory' ? 'win' : match.outcome === 'defeat' || match.outcome === 'cancelled' ? 'loss' : ''}`}>{resultLabel}</span></div><strong className={positive ? 'rating-positive' : match.mmrChange != null && match.mmrChange < 0 ? 'rating-negative' : 'muted'}>{mmrLabel}</strong><span className="muted">{formatDate(match.completedAt || match.createdAt)}</span><span className="more-button" title={match.id}>···</span></div>
+  return <div className={`table-row ${highlighted ? 'deep-link-highlight' : ''}`} data-match-id={match.id}><div className="match-cell"><div className="game-square">V</div><div><strong>Partida clasificatoria</strong><span>{match.opponent}</span></div></div><div><span className={`result ${match.outcome === 'victory' ? 'win' : match.outcome === 'defeat' || match.outcome === 'cancelled' ? 'loss' : ''}`}>{resultLabel}</span></div><strong className={positive ? 'rating-positive' : match.mmrChange != null && match.mmrChange < 0 ? 'rating-negative' : 'muted'}>{mmrLabel}</strong><span className="muted">{formatDate(match.completedAt || match.createdAt)}</span><span className="more-button" title={match.id}>···</span></div>
 }
 
 function TournamentList({ tournaments, hasError }: { tournaments: Tournament[]; hasError: boolean }) {
@@ -487,7 +628,7 @@ function TournamentCard({ tournament }: { tournament: Tournament }) {
   return <article className="tournament-card card"><div className={`tournament-banner ${tone}`}><Trophy size={27} /><span>{tournament.format.replaceAll('_', ' ')}</span><span className="tournament-status-tag">{statusName(tournament.status)}</span></div><div className="tournament-body"><span className="status-pill">{statusName(tournament.status)}</span><h3>{tournament.name}</h3>{tournament.description && <p className="tournament-description">{tournament.description}</p>}<div className="tournament-meta"><span><Users size={14} /> {tournament.currentParticipants} / {tournament.maxParticipants}</span><strong>{tournament.prizePool || 'Premio no especificado'}</strong></div>{tournament.startsAt && <p className="tournament-date">Inicio: {formatDate(tournament.startsAt)}</p>}<span className="visually-hidden">{status}</span></div></article>
 }
 
-function MatchesPage({ workspace, onLogin }: { workspace: Workspace | null; onLogin: () => void }) {
+function MatchesPage({ workspace, onLogin, focusedMatchId, onClearFocus }: { workspace: Workspace | null; onLogin: () => void; focusedMatchId: string | null; onClearFocus: () => void }) {
   const matches = workspace?.matches ?? []
   const hasProfile = Boolean(workspace?.session && workspace.profile)
   const hasMatchError = workspace?.errors.some((error) => error.startsWith('matches:')) ?? false
@@ -495,6 +636,16 @@ function MatchesPage({ workspace, onLogin }: { workspace: Workspace | null; onLo
   const wins = matches.filter((match) => match.outcome === 'victory').length
   const completed = matches.filter((match) => ['victory', 'defeat', 'draw'].includes(match.outcome)).length
   const rate = completed ? `${((wins / completed) * 100).toFixed(1)}%` : '—'
+  const focusedMatch = focusedMatchId ? matches.find((match) => match.id === focusedMatchId) : undefined
+  const hasFocusedMatch = Boolean(focusedMatch)
+  useEffect(() => {
+    if (!focusedMatchId || !hasFocusedMatch) return
+    const frame = window.requestAnimationFrame(() => {
+      const row = Array.from(document.querySelectorAll<HTMLElement>('[data-match-id]')).find((item) => item.dataset.matchId === focusedMatchId)
+      row?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [focusedMatchId, hasFocusedMatch])
   const emptyMessage = !workspace?.session
     ? 'Inicia sesión con Discord para consultar tu historial.'
     : !workspace.profile
@@ -502,7 +653,12 @@ function MatchesPage({ workspace, onLogin }: { workspace: Workspace | null; onLo
       : hasMatchError && !workspace.stale
         ? 'No se pudo consultar el historial real; revisa el error de conexión indicado arriba.'
         : 'No se encontraron partidas para este jugador en ranked_matches.'
-  return <><section className="hero-heading"><div><p className="eyebrow">COMPETIR</p><h1>Historial de partidas</h1><p className="subtitle">Resultados y cambios de MMR consultados desde Supabase.</p></div>{workspace?.session ? <span className="source-pill">Datos del proyecto</span> : <button className="secondary-button" onClick={onLogin}><DiscordMark /> Conectar Discord</button>}</section><div className="stats-strip"><div><span>PARTIDAS CARGADAS</span><strong>{countsAvailable ? matches.length : '—'}</strong></div><div><span>VICTORIAS</span><strong className="text-green">{countsAvailable ? wins : '—'}</strong></div><div><span>WIN RATE</span><strong>{countsAvailable ? rate : '—'}</strong></div><div><span>ESTADO</span><strong className="stat-caption">{workspace?.errors.length ? 'Con errores' : workspace?.session ? 'Sincronizado' : 'No conectado'}</strong></div></div><div className="table-card card full-table"><div className="table-head"><span>PARTIDA</span><span>RESULTADO</span><span>CAMBIO MMR</span><span>FECHA</span><span /></div>{matches.length ? matches.map((match) => <MatchRow key={match.id} match={match} />) : <EmptyState title="No hay historial disponible" body={emptyMessage} />}</div></>
+  return <>
+    <section className="hero-heading"><div><p className="eyebrow">COMPETIR</p><h1>Historial de partidas</h1><p className="subtitle">Resultados y cambios de MMR consultados desde Supabase.</p></div>{workspace?.session ? <span className="source-pill">Datos del proyecto</span> : <button className="secondary-button" onClick={onLogin}><DiscordMark /> Conectar Discord</button>}</section>
+    {focusedMatchId && <div className={`deep-link-notice ${focusedMatch ? '' : 'is-warning'}`} role="status"><div><strong>{focusedMatch ? 'Partida localizada' : 'Enlace de partida recibido'}</strong><span>{focusedMatch ? `ID ${focusedMatchId} · ${focusedMatch.opponent}` : !workspace?.session ? 'Inicia sesión con Discord para buscarla en el historial privado.' : hasMatchError && !workspace.stale ? 'No se pudo verificar ahora por un error de sincronización.' : `El ID ${focusedMatchId} no aparece en el historial visible de esta cuenta.`}</span></div><button className="icon-button" onClick={onClearFocus} aria-label="Cerrar aviso de partida">×</button></div>}
+    <div className="stats-strip"><div><span>PARTIDAS CARGADAS</span><strong>{countsAvailable ? matches.length : '—'}</strong></div><div><span>VICTORIAS</span><strong className="text-green">{countsAvailable ? wins : '—'}</strong></div><div><span>WIN RATE</span><strong>{countsAvailable ? rate : '—'}</strong></div><div><span>ESTADO</span><strong className="stat-caption">{workspace?.errors.length ? 'Con errores' : workspace?.session ? 'Sincronizado' : 'No conectado'}</strong></div></div>
+    <div className="table-card card full-table"><div className="table-head"><span>PARTIDA</span><span>RESULTADO</span><span>CAMBIO MMR</span><span>FECHA</span><span /></div>{matches.length ? matches.map((match) => <MatchRow key={match.id} match={match} highlighted={match.id === focusedMatchId} />) : <EmptyState title="No hay historial disponible" body={emptyMessage} />}</div>
+  </>
 }
 
 function TournamentsPage({ workspace, refreshing, onRefresh }: { workspace: Workspace | null; refreshing: boolean; onRefresh: () => void }) {
@@ -529,8 +685,19 @@ function ProfilePage({ workspace, onLogin }: { workspace: Workspace | null; onLo
   return <><section className="hero-heading"><div><p className="eyebrow">CUENTA</p><h1>Mi perfil</h1><p className="subtitle">Identidad competitiva asociada a tu cuenta de Discord.</p></div><span className="source-pill">Perfil real de Supabase</span></section><div className="profile-layout"><div className="profile-card card"><div className="profile-cover" /><div className="profile-main"><Avatar initials={initials} url={profile.avatar_url || undefined} /><div><h2>{profile.display_name || profile.username}{profile.verified && <span className="verified">✓</span>}</h2><p>@{profile.username}{profile.country ? ` · ${profile.country}` : ''}</p></div><span className="profile-status"><span className="online-dot" />Conectado</span></div><div className="profile-bio">{profile.bio || 'Este perfil no contiene una biografía.'}</div></div><div className="profile-side card"><p className="eyebrow">RANGO COMPETITIVO</p><div className="profile-rank"><div className="rank-emblem small"><Zap size={19} /></div><div><strong>{rank?.rank || 'Sin rango registrado'}</strong><span>{rank?.mmr != null ? `${rank.mmr.toLocaleString('es')} MMR` : 'MMR no disponible'}</span></div></div><div className="mini-stat-row"><span>{rank?.season || 'Temporada no disponible'}</span><strong>{rank?.placementDone ? 'Clasificado' : 'Sin clasificación'}</strong></div></div></div><div className="section-header"><div><p className="eyebrow">ESTADÍSTICAS</p><h2>Rendimiento registrado</h2></div></div><div className="stats-strip profile-stats"><div><span>PARTIDAS</span><strong>{total ?? '—'}</strong></div><div><span>VICTORIAS</span><strong className="text-green">{rank?.wins ?? '—'}</strong></div><div><span>DERROTAS</span><strong>{rank?.losses ?? '—'}</strong></div><div><span>REGIÓN</span><strong className="stat-caption">{profile.region || '—'}</strong></div></div></>
 }
 
-function SettingsPage({ workspace, onLogin, onSignOut }: { workspace: Workspace | null; onLogin: () => void; onSignOut: () => void }) {
-  return <><section className="hero-heading"><div><p className="eyebrow">CUENTA</p><h1>Ajustes</h1><p className="subtitle">Configuración local y estado de la conexión a datos reales.</p></div></section><div className="settings-card card"><div className="setting-row"><div><strong>Cuenta Discord</strong><span>{workspace?.session ? `Conectada · ${workspace.profile?.username || 'perfil por vincular'}` : 'No hay una sesión autenticada.'}</span></div>{workspace?.session ? <button className="secondary-button" onClick={onSignOut}>Cerrar sesión</button> : <button className="secondary-button" onClick={onLogin}><DiscordMark /> Conectar</button>}</div><div className="setting-row"><div><strong>Modo sin conexión</strong><span>Las últimas respuestas reales se guardan en SQLite; no se crean datos ficticios.</span></div><span className="setting-state">{workspace?.stale ? 'Caché en uso' : 'Preparado'}</span></div><div className="setting-row"><div><strong>Navegación recordada</strong><span>La última sección abierta se guarda localmente en SQLite.</span></div><span className="setting-state state-good">Activa</span></div><div className="setting-row"><div><strong>Versión del cliente</strong><span>VANTCALL Desktop 0.1.0 · Sprint 1</span></div><span className="setting-state">Tauri 2</span></div><div className="setting-row"><div><strong>Integración Supabase</strong><span>{supabaseProjectReady ? 'Proyecto VANTSBETA · lectura con clave pública y sesión autenticada.' : `Configuración pendiente: ${missingSupabaseSettings.join(', ')}`}</span></div><span className={`setting-state ${supabaseProjectReady ? 'state-good' : 'state-warn'}`}>{supabaseProjectReady ? 'Conectable' : 'Pendiente'}</span></div><div className="setup-note"><strong>Discord OAuth</strong><p>En Supabase Auth activa el proveedor Discord y añade <code>http://localhost:*/**</code> a Redirect URLs. La app intercambia el código PKCE y conserva tokens únicamente en Stronghold; la clave de Discord permanece en Supabase.</p></div></div></>
+function SettingsPage({ workspace, onLogin, onSignOut, theme, onToggleTheme, isOnline }: { workspace: Workspace | null; onLogin: () => void; onSignOut: () => void; theme: Theme; onToggleTheme: () => void; isOnline: boolean }) {
+  return <>
+    <section className="hero-heading"><div><p className="eyebrow">CUENTA</p><h1>Ajustes</h1><p className="subtitle">Preferencias locales y estado de conexión a datos reales.</p></div></section>
+    <div className="settings-card card">
+      <div className="setting-row"><div><strong>Cuenta Discord</strong><span>{workspace?.session ? `Conectada · ${workspace.profile?.username || 'perfil por vincular'}` : 'No hay una sesión autenticada.'}</span></div>{workspace?.session ? <button className="secondary-button" onClick={onSignOut}>Cerrar sesión</button> : <button className="secondary-button" onClick={onLogin}><DiscordMark /> Conectar</button>}</div>
+      <div className="setting-row"><div><strong>Modo sin conexión</strong><span>El estado de red se detecta en tiempo real; las últimas respuestas reales se conservan en SQLite.</span></div><span className={`setting-state ${isOnline ? 'state-good' : 'state-warn'}`}>{!isOnline ? 'Sin conexión' : workspace?.stale ? 'Caché en uso' : 'En línea'}</span></div>
+      <div className="setting-row"><div><strong>Tema de la aplicación</strong><span>La preferencia se guarda en SQLite en este dispositivo.</span></div><div className="setting-control"><span className="setting-state">{theme === 'light' ? 'Claro' : 'Oscuro'}</span><button className={`toggle ${theme === 'light' ? 'on' : ''}`} onClick={onToggleTheme} aria-pressed={theme === 'light'} aria-label={theme === 'light' ? 'Cambiar a tema oscuro' : 'Cambiar a tema claro'}><span /></button></div></div>
+      <div className="setting-row"><div><strong>Navegación recordada</strong><span>La última sección abierta se guarda localmente en SQLite.</span></div><span className="setting-state state-good">Activa</span></div>
+      <div className="setting-row"><div><strong>Versión del cliente</strong><span>VANTCALL Desktop 0.1.0 · Sprint 4</span></div><span className="setting-state">Tauri 2</span></div>
+      <div className="setting-row"><div><strong>Integración Supabase</strong><span>{supabaseProjectReady ? 'Proyecto VANTSBETA · lectura con clave pública y sesión autenticada.' : `Configuración pendiente: ${missingSupabaseSettings.join(', ')}`}</span></div><span className={`setting-state ${supabaseProjectReady ? 'state-good' : 'state-warn'}`}>{supabaseProjectReady ? 'Conectable' : 'Pendiente'}</span></div>
+      <div className="setup-note"><strong>Discord OAuth</strong><p>En Supabase Auth activa el proveedor Discord y añade <code>http://localhost:*/**</code> a Redirect URLs. La app intercambia el código PKCE y conserva tokens únicamente en Stronghold; la clave de Discord permanece en Supabase.</p></div>
+    </div>
+  </>
 }
 
 function UpdaterSettingsPanel({ enabled, isDesktop, status, version, message, progress, onCheck, onInstall }: { enabled: boolean; isDesktop: boolean; status: UpdaterState; version: string; message: string; progress: number | null; onCheck: () => void; onInstall: () => void }) {
@@ -569,6 +736,20 @@ function NativeSettingsPanel({ enabled, onToggle, isDesktop }: { enabled: boolea
       <div><strong>Bandeja del sistema</strong><span>Al cerrar la ventana se oculta en la bandeja; usa “Abrir”, “Buscar partida” o “Salir” desde su menú.</span></div>
       <span className={`setting-state ${isDesktop ? 'state-good' : 'state-warn'}`}>{isDesktop ? 'Activa' : 'Solo escritorio'}</span>
     </div>
+  </div>
+}
+
+function AnalyticsSettingsPanel({ enabled, summary, onToggle, onClear, isDesktop }: { enabled: boolean; summary: AnonymousAnalyticsSummary; onToggle: () => void; onClear: () => void; isDesktop: boolean }) {
+  return <div className="settings-card card analytics-settings-card">
+    <div className="setting-row">
+      <div><strong>Analítica anónima</strong><span>Registra solo inicios de sesión de la app y secciones usadas; es opcional y viene desactivada.</span></div>
+      <button className={`toggle ${enabled ? 'on' : ''}`} onClick={onToggle} aria-pressed={enabled} aria-label={enabled ? 'Desactivar analítica anónima local' : 'Activar analítica anónima local'}><span /></button>
+    </div>
+    <div className="setting-row">
+      <div><strong>Resumen agregado</strong><span>{summary.sessions} sesiones · {summary.features} usos de funciones. No se guarda ID de cuenta, token o contenido competitivo.</span></div>
+      <button className="secondary-button" onClick={onClear} disabled={summary.sessions === 0 && summary.features === 0}>Borrar registros</button>
+    </div>
+    <div className="setup-note"><strong>{isDesktop ? 'Almacenamiento local SQLite' : 'Vista previa web'}</strong><p>{isDesktop ? 'Los eventos permanecen en este dispositivo y nunca se envían a Supabase ni a otro servidor. Desactivar detiene los siguientes registros; puedes borrar el historial cuando quieras.' : 'Esta vista previa mantiene los eventos solo en memoria temporal. En la app instalada se guardan en SQLite local; no se transmiten a ningún servidor.'}</p></div>
   </div>
 }
 

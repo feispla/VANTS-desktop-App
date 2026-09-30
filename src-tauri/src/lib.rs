@@ -5,6 +5,9 @@ use tauri::{Emitter, Manager, WindowEvent};
 use tauri_plugin_sql::{Migration, MigrationKind};
 use uuid::Uuid;
 
+#[cfg(any(target_os = "linux", all(debug_assertions, target_os = "windows")))]
+use tauri_plugin_deep_link::DeepLinkExt;
+
 const KEYRING_SERVICE: &str = "com.feispla.vantcall.desktop";
 const KEYRING_USER: &str = "stronghold-vault-password";
 
@@ -17,12 +20,16 @@ fn get_or_create_vault_password() -> Result<String, String> {
         Ok(password) => Ok(password),
         Err(KeyringError::NoEntry) => {
             let password = Uuid::new_v4().to_string();
-            entry
-                .set_password(&password)
-                .map_err(|error| format!("No se pudo guardar la clave de Stronghold en el llavero del sistema: {error}"))?;
+            entry.set_password(&password).map_err(|error| {
+                format!(
+                    "No se pudo guardar la clave de Stronghold en el llavero del sistema: {error}"
+                )
+            })?;
             Ok(password)
         }
-        Err(error) => Err(format!("No se pudo leer la clave de Stronghold del llavero del sistema: {error}")),
+        Err(error) => Err(format!(
+            "No se pudo leer la clave de Stronghold del llavero del sistema: {error}"
+        )),
     }
 }
 
@@ -32,7 +39,9 @@ fn create_system_tray(app: &tauri::App) -> tauri::Result<()> {
     let separator = PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, "quit", "Salir", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&open, &find_match, &separator, &quit])?;
-    let icon = app.default_window_icon().cloned()
+    let icon = app
+        .default_window_icon()
+        .cloned()
         .expect("Falta el icono predeterminado definido en tauri.conf.json");
 
     TrayIconBuilder::new()
@@ -76,14 +85,31 @@ fn show_main_window(app: &tauri::AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let migrations = vec![Migration {
-        version: 1,
-        description: "create_local_cache_and_settings",
-        sql: include_str!("../migrations/001_initial.sql"),
-        kind: MigrationKind::Up,
-    }];
+    let migrations = vec![
+        Migration {
+            version: 1,
+            description: "create_local_cache_and_settings",
+            sql: include_str!("../migrations/001_initial.sql"),
+            kind: MigrationKind::Up,
+        },
+        Migration {
+            version: 2,
+            description: "add_anonymous_analytics",
+            sql: include_str!("../migrations/002_anonymous_analytics.sql"),
+            kind: MigrationKind::Up,
+        },
+    ];
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            for arg in &args {
+                if arg.starts_with("vants://") {
+                    let _ = app.emit("deep-link-forwarded", arg.clone());
+                }
+            }
+            show_main_window(app);
+        }))
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_oauth::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
@@ -99,9 +125,11 @@ pub fn run() {
             let data_dir = app.path().app_local_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
             let salt_path = data_dir.join("stronghold.salt");
-            app.handle().plugin(
-                tauri_plugin_stronghold::Builder::with_argon2(&salt_path).build(),
-            )?;
+            app.handle()
+                .plugin(tauri_plugin_stronghold::Builder::with_argon2(&salt_path).build())?;
+
+            #[cfg(any(target_os = "linux", all(debug_assertions, target_os = "windows")))]
+            app.deep_link().register_all()?;
 
             create_system_tray(app)?;
 
