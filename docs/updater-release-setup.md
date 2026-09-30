@@ -16,13 +16,13 @@ El workflow `.github/workflows/updater-draft.yml` compila Windows, Linux y macOS
    npx tauri signer generate -w ~/.tauri/vantcall-desktop.key
    ```
 
-   El comando guarda la clave privada y muestra la clave pública. Copia solo las dos líneas de clave pública a `~/.tauri/vantcall-desktop.pub`; conserva la privada y la contraseña fuera del repositorio. Codifica la pública para la variable de GitHub:
+   El comando guarda la privada en `~/.tauri/vantcall-desktop.key` y genera `~/.tauri/vantcall-desktop.key.pub`. Ese `.pub` ya es el valor Base64 de la clave pública que Tauri debe integrar en la configuración. Para la variable de GitHub, codifica el contenido del archivo una vez más:
 
    ```bash
-   base64 -w0 ~/.tauri/vantcall-desktop.pub
+   base64 -w0 ~/.tauri/vantcall-desktop.key.pub
    ```
 
-   En macOS, si `base64 -w0` no existe, usa `base64 < ~/.tauri/vantcall-desktop.pub | tr -d '\n'`.
+   En macOS, si `base64 -w0` no existe, usa `base64 < ~/.tauri/vantcall-desktop.key.pub | tr -d '\n'`. El workflow quita esa capa externa y conserva el valor `.pub` para Tauri; no codifiques manualmente la clave privada.
 2. En **Settings → Secrets and variables → Actions** del repositorio privado, configura los secrets `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` y `MIRROR_PUBLISH_TOKEN`. El token debe ser fine-grained y limitado al repositorio `vantcall-desktop-releases`, con `Contents: Read and write`; no pegues secretos en el chat ni en commits.
 3. Crea la variable (no secreta) `VANTCALL_UPDATER_PUBKEY_B64` con la salida Base64 de la clave pública. La clave se incorpora al binario para validar firmas y no es confidencial.
 

@@ -6,14 +6,16 @@ if (!encoded) {
 }
 
 let publicKey
+let decodedPublicKey
 try {
   publicKey = Buffer.from(encoded, 'base64').toString('utf8').trim()
+  decodedPublicKey = Buffer.from(publicKey, 'base64').toString('utf8').trim()
 } catch {
   throw new Error('VANTCALL_UPDATER_PUBKEY_B64 no es Base64 válido.')
 }
 
-if (!publicKey.startsWith('untrusted comment: minisign public key') || !publicKey.split('\n')[1]?.trim()) {
-  throw new Error('La variable no parece contener una clave pública minisign de Tauri válida.')
+if (!decodedPublicKey.startsWith('untrusted comment: minisign public key') || !decodedPublicKey.split(/\r?\n/)[1]?.trim()) {
+  throw new Error('La variable no parece ser el Base64 del archivo .pub generado por Tauri.')
 }
 
 const config = {
