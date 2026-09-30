@@ -8,7 +8,7 @@ Cliente premium de escritorio para el circuito competitivo VANTCALL, construido 
 - Lee los datos directamente del proyecto Supabase activo `VANTSBETA` (`qtetsgwwsvqzquxssudj`, región `eu-west-1`) mediante consultas REST `GET` a `players`, `profiles`, `ranked_matches`, `ranked_queue`, `season_player_stats`, `seasons` y `tournaments`.
 - Reintentos con espera exponencial, estados de carga/error y caché SQLite para lectura sin conexión.
 - Discord OAuth mediante Supabase Auth y flujo PKCE en navegador externo; la sesión de Supabase se guarda en Stronghold, cifrada con una clave de instalación guardada en el llavero nativo del sistema. No se utiliza `localStorage` para credenciales.
-- Migración SQLite en `src-tauri/migrations/001_initial.sql`: `sessions` (solo metadatos), `matches_cache`, `api_cache`, `settings` y `notifications`. Los tokens de acceso/refresco no se guardan en SQLite.
+- Migraciones SQLite versionadas: `001_initial.sql` para caché/preferencias/notificaciones y `002_anonymous_analytics.sql` para métricas anónimas locales. Los tokens de acceso/refresco no se guardan en SQLite.
 - Las pantallas vacías reflejan la respuesta real; no se rellenan con datos de demostración.
 
 **Solo lectura sobre Supabase:** este cliente no contiene operaciones de inserción, actualización ni borrado en tablas remotas. La cola de juego queda deshabilitada hasta que exista un endpoint oficial de matchmaking que defina y autorice escrituras. El cierre de sesión limpia metadatos y caché privados locales.
@@ -17,7 +17,16 @@ Cliente premium de escritorio para el circuito competitivo VANTCALL, construido 
 
 - Notificaciones del sistema para una transición real de cola a `matched`, un resultado que se publica/cambia y torneos que empiezan en 15 minutos. El cliente consulta datos cada 60 segundos mientras está abierto o en la bandeja; al salir de la aplicación deja de consultar. Se puede desactivar el permiso en Ajustes y cada evento se deduplica en SQLite.
 - La X oculta la ventana en la bandeja. El menú ofrece Abrir VANTCALL, Buscar partida (abre el dashboard; no escribe en la cola) y Salir.
-- **Updater preparado, distribución pendiente:** el plugin oficial consulta actualizaciones firmadas desde `https://github.com/feispla/vantcall-desktop-releases/releases/latest/download/latest.json`; los ajustes permiten revisar e instalar y el cliente comprueba el feed al iniciar. El mirror público `feispla/vantcall-desktop-releases` ya se creó con solo `README.md`; aún no tiene instaladores ni releases. El código fuente permanece privado. `docs/updater-release-setup.md` explica los Actions Secrets/Variable pendientes. `.github/workflows/updater-draft.yml` crea únicamente borradores; publicar una release requerirá revisión y confirmación separada.
+
+## Sprint 3 — Distribución, actualizaciones y firma
+
+- **Updater y builds multiplataforma preparados:** el plugin oficial consulta `https://github.com/feispla/vantcall-desktop-releases/releases/latest/download/latest.json`. El workflow de tags compila Windows, Linux y macOS; crea únicamente borradores en el mirror público vacío de artefactos. Soporta firma Windows y firma/notarización macOS de forma condicional cuando el propietario configura certificados, variables y Actions Secrets. El código fuente permanece privado; todavía no se han configurado credenciales, creado tags ni publicado instaladores. Ver `docs/updater-release-setup.md`.
+
+## Sprint 4 — Pulido
+
+- Deep links `vants://match/<id>`: abren el historial y enfocan la fila solo si el ID aparece en datos reales sincronizados. La guía `docs/deep-links.md` contiene la integración sugerida; el repo de la web oficial se mantuvo de solo lectura.
+- El estado de red se muestra en la interfaz; la última caché real puede seguir mostrándose offline. Tema claro/oscuro persistido en SQLite.
+- Analítica anónima opcional: se guarda solo en SQLite del dispositivo, sin IDs de cuenta ni transmisión remota; viene desactivada, puede apagarse o borrarse desde Ajustes.
 
 ## Requisitos para conectar datos
 
