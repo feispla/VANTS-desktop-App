@@ -6,11 +6,12 @@ import { listen } from '@tauri-apps/api/event'
 import { getCurrent, onOpenUrl } from '@tauri-apps/plugin-deep-link'
 import './App.css'
 import { fetchMatches, fetchProfile, fetchQueue, fetchRank, fetchTournaments, type CompetitiveRank, type PlayerProfile, type QueueEntry, type RankedMatch, type Tournament } from './lib/api'
-import { createSupabaseClient, signInWithDiscord } from './lib/auth'
+import { handleSupabaseAuthCallback, signInWithDiscord } from './lib/auth'
 import { supabaseProjectReady, missingSupabaseSettings } from './lib/config'
 import { openLocalDatabase, type AnalyticsFeature, type AnonymousAnalyticsSummary, type LocalDatabase, type LocalNotification } from './lib/database'
 import { requestCompetitiveNotificationPermission, sendCompetitiveNotification } from './lib/notifications'
 import { createAuthStorage } from './lib/secure-storage'
+import { getSupabaseClient } from './lib/supabase'
 import { checkForDesktopUpdate, installDesktopUpdate, updaterBuildEnabled, type DesktopDownloadEvent, type DesktopUpdate } from './lib/updater'
 
 type Page = 'dashboard' | 'matches' | 'tournaments' | 'profile' | 'settings'
@@ -145,6 +146,8 @@ function App() {
   const notificationSnapshotRef = useRef<NotificationSnapshot | null>(null)
   const updaterRef = useRef<DesktopUpdate | null>(null)
   const updaterInFlightRef = useRef(false)
+  const supabaseClientRef = useRef<SupabaseClient | null>(null)
+  const pendingAuthDeepLinksRef = useRef<string[]>([])
 
   useEffect(() => {
     const handleOnline = () => setIsOnline(true)
@@ -250,7 +253,7 @@ function App() {
       try {
         const storage = await createAuthStorage()
         const db = await openLocalDatabase()
-        const client = createSupabaseClient(storage)
+        const client = getSupabaseClient(storage)
         const savedPage = await db.getSetting('last_page').catch(() => null)
         const savedNotifications = await db.getSetting('notifications_enabled').catch(() => null)
         const savedTheme = await db.getSetting('theme').catch(() => null)
@@ -317,6 +320,25 @@ function App() {
     }, 60_000)
     return () => window.clearInterval(timer)
   }, [pollingClient, pollingDb, pollingSession, refresh])
+
+  useEffect(() => {
+    const client = workspace?.client
+    const db = workspace?.db
+    const session = workspace?.session
+    if (!client || !db || !session) return
+    const channel = client
+      .channel(`queue-events:${session.user.id}`)
+      .on('postgres_changes', {
+        event: 'INSERT',
+        schema: 'public',
+        table: 'queue_events',
+        filter: `user_id=eq.${session.user.id}`,
+      }, () => {
+        void refresh(client, db, session, true)
+      })
+      .subscribe()
+    return () => { void client.removeChannel(channel) }
+  }, [workspace?.client, workspace?.db, workspace?.session, refresh])
 
   useEffect(() => {
     const reconnected = !previousOnlineRef.current && isOnline
@@ -474,7 +496,23 @@ function App() {
   const handleDeepLink = useCallback((rawUrl: string) => {
     try {
       const url = new URL(rawUrl)
-      if (url.protocol !== 'vants:' || url.hostname.toLowerCase() !== 'match') return
+      if (url.protocol !== 'vants:') return
+      if (url.hostname.toLowerCase() === 'auth' && url.pathname === '/callback') {
+        const previous = lastDeepLinkRef.current
+        const now = Date.now()
+        if (previous?.url === rawUrl && now - previous.at < 1_500) return
+        lastDeepLinkRef.current = { url: rawUrl, at: now }
+        deepLinkOpenedRef.current = true
+        const client = supabaseClientRef.current
+        if (!client) {
+          pendingAuthDeepLinksRef.current.push(rawUrl)
+          return
+        }
+        void handleSupabaseAuthCallback(client, rawUrl)
+          .catch((error) => notify('error', error instanceof Error ? error.message : 'Falló el retorno OAuth de Discord.'))
+        return
+      }
+      if (url.hostname.toLowerCase() !== 'match') return
       const encodedId = url.pathname.split('/').filter(Boolean)[0]
       if (!encodedId) return
       const matchId = decodeURIComponent(encodedId)
@@ -494,6 +532,13 @@ function App() {
       // Los argumentos de proceso externos no son URLs confiables; los que no se puedan parsear se ignoran.
     }
   }, [notify, recordFeatureUse])
+
+  useEffect(() => {
+    supabaseClientRef.current = workspace?.client ?? null
+    if (!workspace?.client || !pendingAuthDeepLinksRef.current.length) return
+    const pendingUrls = pendingAuthDeepLinksRef.current.splice(0)
+    pendingUrls.forEach(handleDeepLink)
+  }, [workspace?.client, handleDeepLink])
 
   useEffect(() => {
     if (!isTauri()) return
@@ -693,9 +738,9 @@ function SettingsPage({ workspace, onLogin, onSignOut, theme, onToggleTheme, isO
       <div className="setting-row"><div><strong>Modo sin conexión</strong><span>El estado de red se detecta en tiempo real; las últimas respuestas reales se conservan en SQLite.</span></div><span className={`setting-state ${isOnline ? 'state-good' : 'state-warn'}`}>{!isOnline ? 'Sin conexión' : workspace?.stale ? 'Caché en uso' : 'En línea'}</span></div>
       <div className="setting-row"><div><strong>Tema de la aplicación</strong><span>La preferencia se guarda en SQLite en este dispositivo.</span></div><div className="setting-control"><span className="setting-state">{theme === 'light' ? 'Claro' : 'Oscuro'}</span><button className={`toggle ${theme === 'light' ? 'on' : ''}`} onClick={onToggleTheme} aria-pressed={theme === 'light'} aria-label={theme === 'light' ? 'Cambiar a tema oscuro' : 'Cambiar a tema claro'}><span /></button></div></div>
       <div className="setting-row"><div><strong>Navegación recordada</strong><span>La última sección abierta se guarda localmente en SQLite.</span></div><span className="setting-state state-good">Activa</span></div>
-      <div className="setting-row"><div><strong>Versión del cliente</strong><span>VANTCALL Desktop 0.1.0 · Sprint 4</span></div><span className="setting-state">Tauri 2</span></div>
+      <div className="setting-row"><div><strong>Versión del cliente</strong><span>VANTCALL Desktop 0.1.1 · Sprint 5</span></div><span className="setting-state">Tauri 2</span></div>
       <div className="setting-row"><div><strong>Integración Supabase</strong><span>{supabaseProjectReady ? 'Proyecto VANTSBETA · lectura con clave pública y sesión autenticada.' : `Configuración pendiente: ${missingSupabaseSettings.join(', ')}`}</span></div><span className={`setting-state ${supabaseProjectReady ? 'state-good' : 'state-warn'}`}>{supabaseProjectReady ? 'Conectable' : 'Pendiente'}</span></div>
-      <div className="setup-note"><strong>Discord OAuth</strong><p>En Supabase Auth activa el proveedor Discord y añade <code>http://localhost:*/**</code> a Redirect URLs. La app intercambia el código PKCE y conserva tokens únicamente en Stronghold; la clave de Discord permanece en Supabase.</p></div>
+      <div className="setup-note"><strong>Discord OAuth</strong><p>En Supabase Auth activa el proveedor Discord y añade <code>vants://auth/callback</code> a Redirect URLs. La app intercambia el código PKCE al recibir el deep link y conserva tokens únicamente en Stronghold; la clave de Discord permanece en Supabase.</p></div>
     </div>
   </>
 }
@@ -729,8 +774,8 @@ function NativeSettingsPanel({ enabled, onToggle, isDesktop }: { enabled: boolea
       <button className={`toggle ${enabled ? 'on' : ''}`} onClick={onToggle} aria-pressed={enabled} aria-label={enabled ? 'Desactivar notificaciones' : 'Activar notificaciones'}><span /></button>
     </div>
     <div className="setting-row">
-      <div><strong>Sincronización de eventos</strong><span>Consulta los datos reales cada minuto mientras VANTCALL Desktop está abierto, también en la bandeja. No opera si sales de la aplicación.</span></div>
-      <span className={`setting-state ${isDesktop ? 'state-good' : 'state-warn'}`}>{isDesktop ? 'Cada 60 s' : 'Solo escritorio'}</span>
+      <div><strong>Sincronización de eventos</strong><span>Escucha eventos Realtime privados de cola; la consulta cada minuto sigue como respaldo mientras VANTCALL Desktop está abierto.</span></div>
+      <span className={`setting-state ${isDesktop ? 'state-good' : 'state-warn'}`}>{isDesktop ? 'Realtime + respaldo' : 'Solo escritorio'}</span>
     </div>
     <div className="setting-row">
       <div><strong>Bandeja del sistema</strong><span>Al cerrar la ventana se oculta en la bandeja; usa “Abrir”, “Buscar partida” o “Salir” desde su menú.</span></div>

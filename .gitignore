@@ -11,6 +11,9 @@ node_modules
 dist
 dist-ssr
 *.local
+.env
+.env.*
+!.env.example
 src-tauri/tauri.updater.generated.conf.json
 
 # Editor directories and files
