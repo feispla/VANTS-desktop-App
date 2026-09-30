@@ -17,7 +17,7 @@ Si encuentras una vulnerabilidad en VANTCALL Desktop, VANTS o la infraestructura
 
 - **No** abras un issue público.
 - **No** publiques detalles en Discord, redes sociales ni foros.
-- Escribe a **security@vants.gg** con:
+- Escribe a **security@vants.gg** con: o feispla@zohomail.com
   - Descripción de la vulnerabilidad.
   - Pasos para reproducirla.
   - Impacto potencial.
