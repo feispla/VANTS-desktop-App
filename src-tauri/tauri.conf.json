@@ -13,14 +13,16 @@
     "windows": [
       {
         "title": "VANTCALL Desktop",
-        "width": 800,
-        "height": 600,
+        "width": 1280,
+        "height": 840,
+        "minWidth": 1200,
+        "minHeight": 800,
         "resizable": true,
         "fullscreen": false
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self' tauri: asset: http://asset.localhost; connect-src 'self' ipc: http://ipc.localhost https://qtetsgwwsvqzquxssudj.supabase.co wss://qtetsgwwsvqzquxssudj.supabase.co; img-src 'self' asset: http://asset.localhost https://*.supabase.co data: blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; base-uri 'self'; frame-ancestors 'none'"
     }
   },
   "bundle": {

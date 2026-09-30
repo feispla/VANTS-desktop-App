@@ -1,11 +1,15 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "enables the default permissions",
-  "windows": [
-    "main"
-  ],
+  "description": "Permisos mínimos del cliente VANTCALL Desktop para OAuth, sesión segura y SQLite local.",
+  "windows": ["main"],
   "permissions": [
-    "core:default"
+    "core:default",
+    "oauth:allow-start",
+    "oauth:allow-cancel",
+    "opener:default",
+    "stronghold:default",
+    "sql:default",
+    "sql:allow-execute"
   ]
 }
