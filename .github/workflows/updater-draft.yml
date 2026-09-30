@@ -13,6 +13,9 @@ jobs:
     name: Build ${{ matrix.platform }} (${{ matrix.label }})
     strategy:
       fail-fast: false
+      # tauri-action merges each platform into latest.json by downloading and replacing the draft asset.
+      # Keep these uploads sequential so parallel jobs cannot lose each other's updater entries.
+      max-parallel: 1
       matrix:
         include:
           - platform: macos-latest
@@ -128,17 +131,77 @@ jobs:
         env:
           VANTCALL_UPDATER_PUBKEY_B64: ${{ secrets.VANTCALL_UPDATER_PUBKEY_B64 || vars.VANTCALL_UPDATER_PUBKEY_B64 }}
           WINDOWS_TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}
+          APPLE_SIGNING_ENABLED: ${{ vars.APPLE_SIGNING_ENABLED }}
 
-      - name: Build and upload a private-review draft to the artifact-only mirror
+      - name: Normalize updater signing key
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY_RAW: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          key="$(printf '%s' "$TAURI_SIGNING_PRIVATE_KEY_RAW" | tr -d '\r\n')"
+          if [[ -z "$key" ]]; then
+            echo 'TAURI_SIGNING_PRIVATE_KEY is empty.' >&2
+            exit 1
+          fi
+          printf '::add-mask::%s\n' "$key"
+          printf 'TAURI_SIGNING_PRIVATE_KEY=%s\n' "$key" >> "$GITHUB_ENV"
+
+      - name: Build and upload draft (Windows/Linux; Apple secrets excluded)
+        if: ${{ matrix.platform != 'macos-latest' }}
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.MIRROR_PUBLISH_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          VITE_UPDATER_ENABLED: 'true'
+        with:
+          projectPath: .
+          owner: feispla
+          repo: vantcall-desktop-releases
+          tagName: v__VERSION__
+          releaseName: VANTCALL Desktop v__VERSION__
+          releaseBody: >-
+            Borrador de distribución de VANTCALL Desktop. Revisar instaladores y firmas antes de publicar.
+            Esta release contiene artefactos; el repositorio fuente permanece privado.
+          releaseCommitish: main
+          releaseDraft: true
+          prerelease: false
+          uploadUpdaterJson: true
+          uploadUpdaterSignatures: true
+          args: --config src-tauri/tauri.updater.generated.conf.json ${{ matrix.args }}
+
+      - name: Build and upload macOS draft (ad-hoc signature; no Apple credentials)
+        if: ${{ matrix.platform == 'macos-latest' && vars.APPLE_SIGNING_ENABLED != 'true' }}
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.MIRROR_PUBLISH_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          VITE_UPDATER_ENABLED: 'true'
+        with:
+          projectPath: .
+          owner: feispla
+          repo: vantcall-desktop-releases
+          tagName: v__VERSION__
+          releaseName: VANTCALL Desktop v__VERSION__
+          releaseBody: >-
+            Borrador de distribución de VANTCALL Desktop. Revisar instaladores y firmas antes de publicar.
+            Esta release contiene artefactos; el repositorio fuente permanece privado.
+          releaseCommitish: main
+          releaseDraft: true
+          prerelease: false
+          uploadUpdaterJson: true
+          uploadUpdaterSignatures: true
+          args: --config src-tauri/tauri.updater.generated.conf.json ${{ matrix.args }}
+
+      - name: Build and upload macOS draft (Apple Developer ID and notarization)
+        if: ${{ matrix.platform == 'macos-latest' && vars.APPLE_SIGNING_ENABLED == 'true' }}
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.MIRROR_PUBLISH_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           VITE_UPDATER_ENABLED: 'true'
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
@@ -157,3 +220,24 @@ jobs:
           uploadUpdaterJson: true
           uploadUpdaterSignatures: true
           args: --config src-tauri/tauri.updater.generated.conf.json ${{ matrix.args }}
+
+      - name: Sign and upload supplemental DMG/DEB signatures
+        if: ${{ matrix.platform == 'macos-latest' || matrix.platform == 'ubuntu-22.04' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.MIRROR_PUBLISH_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          app_version="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          mapfile -t installers < <(find src-tauri/target/release/bundle -type f \( -name '*.dmg' -o -name '*.deb' \) -print | sort)
+          if [[ ${#installers[@]} -eq 0 ]]; then
+            echo 'Expected a .dmg or .deb installer on this platform but found none.' >&2
+            exit 1
+          fi
+          for installer in "${installers[@]}"; do
+            ./node_modules/.bin/tauri signer sign --app-version "$app_version" "$installer"
+            signature="${installer}.sig"
+            test -s "$signature"
+            gh release upload "$GITHUB_REF_NAME" "$signature" --repo feispla/vantcall-desktop-releases --clobber
+          done

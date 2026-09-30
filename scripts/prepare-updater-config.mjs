@@ -30,6 +30,13 @@ const config = {
   },
 }
 
+const appleSigningEnabled = process.env.APPLE_SIGNING_ENABLED?.trim() === 'true'
+const appleSigningIdentity = process.env.APPLE_SIGNING_IDENTITY?.trim()
+if (appleSigningEnabled && !appleSigningIdentity) {
+  throw new Error('APPLE_SIGNING_ENABLED=true requiere una identidad Apple Developer ID importada.')
+}
+config.bundle.macOS = { signingIdentity: appleSigningEnabled ? appleSigningIdentity : '-' }
+
 const windowsThumbprint = process.env.WINDOWS_SIGNING_THUMBPRINT?.trim()
 if (windowsThumbprint) {
   const timestampUrl = process.env.WINDOWS_TIMESTAMP_URL?.trim()
