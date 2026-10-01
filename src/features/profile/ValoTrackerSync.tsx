@@ -1,5 +1,5 @@
 import React from 'react'
-import { getTrackerUrl, validateRiotHandle } from '../utils/riotValidation'
+import { getTrackerUrl, validateRiotHandle } from '../../utils/riotValidation'
 
 interface ValoTrackerSyncProps {
   riotHandle: string | null

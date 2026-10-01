@@ -22,7 +22,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self' tauri: asset: http://asset.localhost; connect-src 'self' ipc: http://ipc.localhost https://qtetsgwwsvqzquxssudj.supabase.co wss://qtetsgwwsvqzquxssudj.supabase.co; img-src 'self' asset: http://asset.localhost https://*.supabase.co data: blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; base-uri 'self'; frame-ancestors 'none'"
+      "csp": "default-src 'self' tauri: asset: http://asset.localhost; connect-src 'self' ipc: http://ipc.localhost https://qtetsgwwsvqzquxssudj.supabase.co wss://qtetsgwwsvqzquxssudj.supabase.co; img-src 'self' asset: http://asset.localhost https://*.supabase.co data: blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://api.fontshare.com; font-src 'self' https://fonts.gstatic.com https://cdn.fontshare.com data:; base-uri 'self'; frame-ancestors 'none'"
     }
   },
   "bundle": {
