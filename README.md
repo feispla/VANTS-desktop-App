@@ -38,6 +38,36 @@ Cliente premium de escritorio para el circuito competitivo VANTCALL, construido 
 
 - No se incluyeron endpoints ni claves simuladas. Riot requiere registrar el producto y opt-in/RSO para datos individuales; Steam Web API no documenta historial de partidas CS2 por jugador. Se necesita aprobación del propietario para el producto Riot/RSO y decidir una fuente CS2 autorizada antes de añadir vinculación o cron. Detalles y referencias oficiales: [`docs/PENDIENTE-OWNER.md`](docs/PENDIENTE-OWNER.md).
 
+## Sprint 7 — Organización, acceso multi-proveedor y zona de plan
+
+El cliente es el panel del bot y la consola de escritorio de VANTS. El código se reorganizó por funcionalidades para que cada pantalla viva en su propia carpeta:
+
+```
+src/
+  main.tsx                  arranque de React + estilos
+  app/                      carcasa de la aplicación
+    App.tsx                 estado global, sesión, deep links, updater y navegación
+    navigation.ts           elementos del menú lateral
+    types.ts                tipos compartidos (Page, Workspace, Toast…)
+    workspace.ts            caché offline y notificaciones nativas derivadas
+  features/
+    auth/LoginOptions.tsx   botones Discord / Google / Steam
+    dashboard/              resumen competitivo
+    matches/                historial de partidas
+    tournaments/            torneos
+    profile/                perfil + ValoTrackerSync
+    plan-zone/              zona exclusiva BASIC / PRO / ELITE
+    settings/               ajustes, notificaciones, analítica y updater
+  components/               UI reutilizable (Avatar, EmptyState, GameBadge, iconos de marca)
+  lib/                      Supabase, auth, API REST, planes, SQLite, updater
+  styles/                   app.css (base) + premium.css (capa visual alineada con la web)
+  utils/                    validaciones (Riot ID)
+```
+
+- **Inicio de sesión:** Discord y Google usan OAuth PKCE de Supabase con `vants://auth/callback`. Steam usa OpenID 2.0 mediante la Edge Function `steam-login` (repositorio web), que devuelve un `token_hash` de un solo uso canjeado con `verifyOtp`.
+- **Volver a entrar tras cerrar sesión:** un nuevo intento sustituye al pendiente (antes quedaba bloqueado con "Ya hay un inicio de sesión Discord en curso"), Discord pide `prompt=consent`, Google `select_account`, y el cierre de sesión cae a `scope: local` si la revocación remota falla.
+- **Zona de plan:** lee `entitlements` y `plan_content`. Las filas visibles las decide RLS en Supabase (`current_plan_rank()`), no el cliente; los planes bloqueados enlazan al checkout de la web.
+
 ## Requisitos para conectar datos
 
 1. El cliente ya viene conectado al proyecto VANTSBETA con su clave pública `sb_publishable_...`; `.env.example` documenta el mismo proyecto y se puede copiar a `.env.local` para usar overrides. También admite `VITE_SUPABASE_ANON_KEY` legacy; **nunca uses `service_role` ni `sb_secret_...`**.

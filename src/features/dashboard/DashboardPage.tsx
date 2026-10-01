@@ -1,0 +1,29 @@
+import { ChevronDown, Gamepad2, Search, ShieldCheck, Swords, Zap } from 'lucide-react'
+import type { Workspace } from '../../app/types'
+import type { Page } from '../../app/types'
+import { EmptyState, GameBadge } from '../../components/ui'
+import { formatDate, gameName } from '../../lib/format'
+import { MatchRow } from '../matches/MatchRow'
+import { TournamentList } from '../tournaments/TournamentCard'
+import { LoginOptions, type LoginHandler } from '../auth/LoginOptions'
+
+export function DashboardPage({ workspace, refreshing, onRefresh, onLogin, onNavigate }: { workspace: Workspace | null; refreshing: boolean; onRefresh: () => void; onLogin: LoginHandler; onNavigate: (page: Page) => void }) {
+  const profile = workspace?.profile
+  const rank = workspace?.rank
+  const wins = rank?.wins ?? null
+  const losses = rank?.losses ?? null
+  const rankedTotal = wins !== null && losses !== null ? wins + losses : null
+  const queueError = workspace?.errors.some((error) => error.startsWith('queue:')) ?? false
+  const queueLabel = !workspace?.session ? 'Conecta Discord' : !profile ? 'Perfil sin vincular' : workspace.queue?.status === 'matched' ? 'Partida encontrada' : workspace.queue ? 'En cola' : queueError ? 'Estado no disponible' : 'Sin búsqueda activa'
+  const queueCopy = workspace?.queue?.status === 'matched' ? 'Supabase informa que tu entrada real ya fue emparejada.' : workspace?.queue ? `Estado real de cola: ${workspace.queue.status}.` : !workspace?.session ? 'Conecta Discord para consultar tu estado personal de cola.' : !profile ? 'Se necesita un perfil de jugador asociado para consultar la cola.' : queueError ? 'No se pudo consultar el estado real de la cola.' : 'No hay una entrada activa en tu cola competitiva.'
+  return <>
+    <section className="hero-heading"><div><p className="eyebrow">VANTCALL · CIRCUITO COMPETITIVO</p><h1>{profile ? `Buenas, ${profile.display_name || profile.username}` : workspace?.session ? 'Tu cuenta VANTCALL' : 'Compite en VANTCALL'} <span className="wave">✦</span></h1><p className="subtitle">{profile ? 'Tu estado competitivo sincronizado con los datos del proyecto.' : 'Conecta tu cuenta para consultar perfil, rango e historial reales.'}</p></div><button className="secondary-button" onClick={onRefresh} disabled={refreshing}><Search size={16} />{refreshing ? 'Actualizando…' : 'Actualizar datos'}</button></section>
+    {!workspace?.session && <section className="auth-banner card"><div><p className="eyebrow">ACCESO SEGURO</p><h2>Vincula tu identidad de jugador</h2><p>Inicia sesión con Discord, Google o Steam. El token se guarda cifrado en Stronghold y nunca en localStorage.</p></div><LoginOptions onLogin={onLogin} /></section>}
+    <section className="dashboard-grid"><div className="rank-card card"><div className="card-heading"><div><p className="eyebrow">RANGO VANTS{profile?.main_game ? ` · ${gameName(profile.main_game)}` : ''}</p><h2>{rank?.rank || 'Sin rango registrado'}</h2></div><div className="rank-emblem"><Zap size={27} /></div></div><div className="rank-progress"><div className="progress-label"><span>{rank?.mmr != null ? `${rank.mmr.toLocaleString('es')} MMR` : 'MMR no disponible'}</span><span>{rank?.season || 'Sin temporada activa'}</span></div><div className="rank-progress-placeholder" /><p>{rank ? `${wins ?? '—'} victorias · ${losses ?? '—'} derrotas${rankedTotal ? ` · ${((wins! / rankedTotal) * 100).toFixed(1)}% de victorias` : ''}` : 'El rango aparecerá cuando exista una estadística de temporada para tu perfil.'}</p><p className="progress-note">{rank ? 'El proyecto no publica progreso al siguiente rango.' : ''}</p></div><div className="rank-footer"><span><span className="green-dot" />{rank?.placementDone ? 'Clasificación completada' : rank ? 'Clasificación no publicada' : 'Sin datos de temporada'}</span><button onClick={() => onNavigate('profile')}>Ver perfil <span>→</span></button></div></div>
+      <div className="queue-card card"><div className="card-heading"><div><p className="eyebrow">COLA CLASIFICATORIA</p><h2>{queueLabel}</h2></div><Gamepad2 size={24} className="red-icon" /></div><p className="card-copy">{queueCopy}</p><div className="queue-select"><GameBadge game={profile?.main_game ? gameName(profile.main_game) : 'Sin juego configurado'} /><span>{workspace?.queue ? `Creada ${formatDate(workspace.queue.createdAt)}` : 'La cola requiere el servicio oficial de matchmaking'}</span><ChevronDown size={16} /></div><button className="primary-button disabled-button" disabled title="El cliente de escritorio no enviará escrituras a la cola de Supabase."><Swords size={18} />Servicio de cola no disponible<span>—</span></button><div className="queue-meta"><span><ShieldCheck size={14} />Solo lectura; sin escrituras a Supabase</span><span>API pendiente</span></div></div></section>
+    <section className="section-header"><div><p className="eyebrow">ACTIVIDAD COMPETITIVA</p><h2>Últimas partidas</h2></div><button className="link-button" onClick={() => onNavigate('matches')}>Ver historial <span>→</span></button></section>
+    <div className="table-card card"><div className="table-head"><span>PARTIDA</span><span>RESULTADO</span><span>CAMBIO MMR</span><span>FECHA</span><span /></div>{workspace?.matches.length ? workspace.matches.slice(0, 3).map((match) => <MatchRow key={match.id} match={match} />) : <EmptyState title="Sin partidas registradas" body={profile ? 'No se encontraron partidas clasificatorias asociadas a tu jugador.' : 'Las partidas reales aparecerán aquí después de vincular un perfil.'} />}</div>
+    <section className="section-header tournament-header"><div><p className="eyebrow">COMPETICIÓN</p><h2>Torneos del proyecto</h2></div><button className="link-button" onClick={() => onNavigate('tournaments')}>Explorar <span>→</span></button></section>
+    <TournamentList tournaments={workspace?.tournaments ?? []} hasError={workspace?.errors.some((error) => error.startsWith('tournaments:')) ?? false} />
+  </>
+}

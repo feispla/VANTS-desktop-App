@@ -67,7 +67,7 @@ export class ApiError extends Error {
   }
 }
 
-async function getRows<T>(client: SupabaseClient, route: string): Promise<T[]> {
+export async function getRows<T>(client: SupabaseClient, route: string): Promise<T[]> {
   if (!supabaseConfig.url || !supabaseConfig.apiKey) {
     throw new ApiError('Falta la configuración de Supabase para consultar datos reales.')
   }
