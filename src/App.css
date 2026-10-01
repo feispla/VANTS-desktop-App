@@ -32,3 +32,5 @@
 :root[data-theme="light"] .secondary-button,:root[data-theme="light"] .icon-button:hover{background:#f2f3f6;color:#343944;border-color:var(--line)}
 :root[data-theme="light"] .deep-link-notice span,:root[data-theme="light"] .updater-progress,:root[data-theme="light"] .updater-message{color:#586272}
 :root[data-theme="light"] .setup-note code{background:#fff0f1;color:#b21c26}
+
+.valotracker-sync{margin-top:18px;padding:22px}.valotracker-sync h2{font:600 18px 'Space Grotesk';margin:0}.valotracker-copy{color:#b5b5bc;font-size:12px;line-height:1.6;margin:14px 0}.valotracker-actions{display:flex;flex-wrap:wrap;gap:8px}.valotracker-actions a{text-decoration:none}.valotracker-note{color:#777;font-size:11px;margin:14px 0 0}.valotracker-note code,.valotracker-copy code{color:#ff6872}

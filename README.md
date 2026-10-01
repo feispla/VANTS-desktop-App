@@ -65,6 +65,10 @@ npm run desktop:build
 
 El empaquetado Tauri requiere Rust/Cargo y las dependencias nativas del sistema de Tauri. La ventana inicial es de 1280 × 840 y su tamaño mínimo es 1200 × 800. Para el flujo de actualizaciones firmado, consulta [docs/updater-release-setup.md](docs/updater-release-setup.md); los builds locales no habilitan el feed.
 
+### Riot / ValoTracker
+
+The authenticated profile includes `ValoTrackerSync`, which reads the optional Riot account from `user_game_accounts` and links to Tracker.gg and the configured Discord stats channel. Set `VITE_DISCORD_GUILD_ID` and `VITE_DISCORD_VALORANT_STATS_CHANNEL_ID` in `.env.local` to enable the Discord link. If the account table is unavailable, the rest of the real profile still loads and the card explains that no Riot account is linked.
+
 ## Autenticación segura y datos locales
 
 El proveedor Discord usa Supabase Auth con PKCE y el deep link nativo `vants://auth/callback`. La clave aleatoria de Stronghold se almacena en Keychain/Windows Credential Manager/Secret Service según el sistema. Si el almacén nativo no está disponible, el cliente falla de forma cerrada en vez de persistir tokens en texto plano. En la vista web de desarrollo solo hay almacenamiento en memoria para facilitar el build; la autenticación requiere la app de escritorio.

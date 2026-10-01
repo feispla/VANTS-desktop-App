@@ -13,6 +13,7 @@ export interface PlayerProfile {
   country: string | null
   bio: string | null
   stats: Record<string, unknown>
+  riot_handle: string | null
 }
 
 export interface RankedMatch {
@@ -151,7 +152,17 @@ export async function fetchProfile(client: SupabaseClient, user: User): Promise<
   const profiles = await getRows<{ bio: string | null; stats: Record<string, unknown> | null }>(
     client, `profiles?select=bio,stats&player_id=eq.${encodeURIComponent(player.id)}&limit=1`,
   )
-  return { ...player, bio: profiles[0]?.bio ?? null, stats: profiles[0]?.stats ?? {} }
+  let riotHandle: string | null = null
+  try {
+    const accounts = await getRows<{ handle: string | null }>(
+      client,
+      `user_game_accounts?select=handle&user_id=eq.${encodeURIComponent(user.id)}&game=eq.riot&limit=1`,
+    )
+    riotHandle = accounts[0]?.handle ?? null
+  } catch {
+    // Riot linking is optional; an older schema must not prevent the profile loading.
+  }
+  return { ...player, bio: profiles[0]?.bio ?? null, stats: profiles[0]?.stats ?? {}, riot_handle: riotHandle }
 }
 
 export async function fetchMatches(client: SupabaseClient, profile: PlayerProfile): Promise<RankedMatch[]> {
